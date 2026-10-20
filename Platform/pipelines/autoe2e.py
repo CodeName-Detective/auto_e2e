@@ -108,6 +108,9 @@ class ModelRef:
 
     model_version: str = ""
     checkpoint_uri: str = ""
+    # For a bare checkpoint only: its training epoch, which Reactive stage
+    # contracts check (KITScenes fine-tuning requires the epoch-5 nuPlan parent).
+    checkpoint_epoch: int = 0
 
 
 @dataclass
@@ -246,6 +249,7 @@ def resolve_parent(parent: Optional[ModelRef]) -> ParentHandle:
         return ParentHandle(
             present=True, checkpoint_uri=parent.checkpoint_uri,
             checkpoint_sha256=checkpoint_sha256(s3, parent.checkpoint_uri),
+            epoch=parent.checkpoint_epoch,
         )
     name, _, version = parent.model_version.rpartition("/")
     if name != REGISTERED_MODEL or not version:
@@ -405,7 +409,9 @@ def store_checkpoint(s3, *, source_uri: str, sha256: str, bucket: str) -> str:
     target = f"s3://{bucket}/{key}"
     try:
         s3.head_object(Bucket=bucket, Key=key)
-    except Exception:
+    except Exception as error:
+        if getattr(error, "response", {}).get("Error", {}).get("Code") not in {"404", "NoSuchKey", "NotFound"}:
+            raise
         source_bucket, source_key = _split_s3_uri(source_uri)
         s3.copy({"Bucket": source_bucket, "Key": source_key}, bucket, key)
     if checkpoint_sha256(s3, target) != sha256:
@@ -503,8 +509,19 @@ def register_models(
     am.log_dataset_input(client, run_id=trained.run_id, dataset=training_dataset, context="training",
                          model_id=parent.model_id or None)
     from mlflow.entities import LoggedModelOutput
+    from mlflow.exceptions import MlflowException
 
-    client.log_outputs(trained.run_id, [LoggedModelOutput(m.model_id, 0) for m in results])
+    run_outputs = client.get_run(trained.run_id).outputs
+    linked = {o.model_id for o in ((run_outputs.model_outputs if run_outputs else None) or [])}
+    missing = [LoggedModelOutput(m.model_id, 0) for m in results if m.model_id not in linked]
+    if missing:
+        try:
+            client.log_outputs(trained.run_id, missing)
+        except MlflowException:
+            # A retry may race an earlier attempt that already linked them.
+            linked = {o.model_id for o in (client.get_run(trained.run_id).outputs.model_outputs or [])}
+            if any(m.model_id not in linked for m in missing):
+                raise
     return results
 
 
@@ -530,7 +547,8 @@ def _register_imported(client, s3, experiment, parent: ParentHandle, runtime: Ru
                   "checkpoint_uri": stored, "checkpoint_epoch": parent.epoch,
                   "lineage_sha256": lineage_sha, "stage_index": 0},
         dataset_spec=None, training_spec=None,
-        provenance={"imported_from": parent.checkpoint_uri, "flyte_execution_id": _execution_id()},
+        # Only stable values: a second import of the same weights must match.
+        provenance={"imported": "true"},
     )
     model = am.ensure_logged_model(
         client, experiment=experiment, source_run_id=None, name="imported", params=params,
@@ -563,7 +581,8 @@ def _evaluation_run(client, experiment: str, name: str) -> str:
 
 
 def _log(client, s3, runtime, *, run_id, model: RegisteredModel, dataset: DatasetHandle, suite: str,
-         metrics: dict, protocol: dict, per_sample_uri: str, per_sample_sha: str) -> None:
+         metrics: dict, protocol: dict, per_sample_uri: str, per_sample_sha: str,
+         model_reexecuted: bool = True) -> None:
     from Platform.pipelines import autoe2e_mlflow as am
     from Platform.pipelines.autoe2e_lineage import evaluation_record, record_bytes
     from Platform.pipelines.autoe2e_store import read_dataset_lineage
@@ -575,7 +594,8 @@ def _log(client, s3, runtime, *, run_id, model: RegisteredModel, dataset: Datase
         dataset={"dataset_id": dataset.dataset_id, "lineage_sha256": dataset.lineage_sha256,
                  "published": f"{dataset.published_name}/{dataset.version}"},
         protocol=protocol, metrics=metrics,
-        per_sample={"uri": per_sample_uri, "sha256": per_sample_sha},
+        per_sample={"uri": per_sample_uri, "sha256": per_sample_sha} if model_reexecuted else None,
+        model_reexecuted=model_reexecuted,
         code={"image_digest": TRAINING_IMAGE, "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown")},
         flyte_execution_id=_execution_id(), finished_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -583,12 +603,14 @@ def _log(client, s3, runtime, *, run_id, model: RegisteredModel, dataset: Datase
         dataset_lineage=lineage, dataset_lineage_sha256=dataset.lineage_sha256,
         index_uri=f"s3://{runtime.datasets_bucket}/{dataset.published_name}/by-id/{dataset.dataset_id}.json",
     )
-    suite_name = f"{suite}@{dataset.published_name}-{dataset.version}"
+    # MLflow metric names allow "/", ".", "-", and "_" but not "@".
+    suite_name = f"{suite}/{dataset.published_name}-{dataset.version}"
     _attach_dataset_lineage(client, s3, runtime, model.model_id, dataset, lineage)
     am.log_evaluation(
         client, run_id=run_id, model_id=model.model_id, dataset=mlflow_dataset,
         context=f"eval:{suite}", metrics=metrics, suite=suite_name,
-        record_payload=record_bytes(record), record_name=f"{dataset.dataset_id}.json",
+        # Execution-scoped name: a re-evaluation adds a record, never replaces one.
+        record_payload=record_bytes(record), record_name=f"{dataset.dataset_id}-{_execution_id()}.json",
     )
 
 
@@ -629,7 +651,7 @@ def log_internal_validation(
         metrics = numeric_leaves("", json.loads(source))
         _log(client, s3, runtime, run_id=run_id, model=model, dataset=dataset, suite="internal_val",
              metrics=metrics, protocol={"name": "ray_validation_holdout", "source": "training_metrics"},
-             per_sample_uri="", per_sample_sha=model.lineage_sha256)
+             per_sample_uri="", per_sample_sha="", model_reexecuted=False)
     client.set_terminated(run_id)
 
 
@@ -661,15 +683,21 @@ def evaluate_kitscenes_benchmark(
     for model in models:
         output = evaluate_reactive_kitscenes_checkpoint.task_function(
             checkpoint=FlyteFile(model.checkpoint_uri),
-            shards=[FlyteDirectory(uri) for uri in dataset.partition_uris],
+            shards=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
             source_split=split,
         )
         report_bytes = open(output.report.download(), "rb").read()
         if sha256_bytes(report_bytes) != output.report_sha256 or output.checkpoint_sha256 != model.checkpoint_sha256:
             raise RuntimeError("benchmark report does not match its checkpoint")
         report = json.loads(report_bytes)
-        key = f"autoe2e/evaluations/{model.checkpoint_sha256}/kitscenes_benchmark/{dataset.dataset_id}.json"
-        s3.put_object(Bucket=runtime.checkpoints_bucket, Key=key, Body=report_bytes)
+        from Platform.pipelines.dataset_publication_tasks import _put_immutable
+
+        key = (
+            f"autoe2e/evaluations/{model.checkpoint_sha256}/kitscenes_benchmark/"
+            f"{dataset.dataset_id}/{output.report_sha256}.json"
+        )
+        _put_immutable(s3, bucket=runtime.checkpoints_bucket, key=key, payload=report_bytes,
+                       content_type="application/json")
         _log(client, s3, runtime, run_id=run_id, model=model, dataset=dataset, suite="kitscenes_benchmark",
              metrics=numeric_leaves("", report["metrics"]),
              protocol={"name": report["schema_version"], "evaluation_role": report["evaluation_role"]},
