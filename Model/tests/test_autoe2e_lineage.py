@@ -54,11 +54,12 @@ def _dataset(units=None, labels={"teacher": "openai_compatible"}):
     return dataset_lineage(
         dataset_id=_spec_id(),
         spec=SPEC,
-        published={"name": "kitscenes", "version": "v3.6", "manifest_key": "k", "manifest_sha256": H("e")},
+        published={"name": "kitscenes", "version": "v3.6"},
         raw={"upstream": "KIT-MRT/KITScenes-Multimodal", "revision": "r", "snapshot_manifest_sha256": H("f")},
         labels=labels,
         units=units or [_unit("b"), _unit("a", label_origin="created")],
-        units_uri="s3://datasets/kitscenes/v3.6/lineage/units.parquet",
+        units_uri="s3://datasets/kitscenes/v3.6/lineage/units.jsonl",
+        views={"key": "kitscenes/v3.6/partitions/manifest.json", "sha256": H("7"), "partition_ids": ["p-a", "p-b"]}, console=None,
         pack={"contracts": {"shard": "v13"}, "image_digest": "sha256:x", "git_commit": "c"},
         build={"flyte_execution_id": "x"},
     )
@@ -70,10 +71,10 @@ def test_dataset_id_must_be_the_spec_digest():
     with _pytest.raises(ValueError, match="digest of the given spec"):
         dataset_lineage(
             dataset_id=H("d"), spec=SPEC,
-            published={"name": "kitscenes", "version": "v3.6", "manifest_key": "k", "manifest_sha256": H("e")},
+            published={"name": "kitscenes", "version": "v3.6"},
             raw={"snapshot_manifest_sha256": H("f")}, labels=None,
             units=[_unit("a", label_id=None, label_record_sha256=None, label_origin=None)],
-            units_uri="s3://x", pack={}, build={},
+            units_uri="s3://x", views={"key": "kitscenes/v3.6/partitions/manifest.json", "sha256": H("7"), "partition_ids": ["p-a", "p-b"]}, console=None, pack={}, build={},
         )
 
 
@@ -225,3 +226,10 @@ def test_parse_record_checks_digest_schema_and_canonical_form():
     pretty = json.dumps(record, indent=1).encode()
     with pytest.raises(ValueError, match="canonical"):
         parse_record(pretty, expected_sha256=sha256_bytes(pretty), schema=CHECKPOINT_LINEAGE_SCHEMA)
+
+
+def test_units_must_belong_to_published_partitions():
+    with pytest.raises(ValueError, match="not published"):
+        _dataset([_unit("a", partition_id="p-zzz")])
+    record, _ = _dataset([_unit("a", partition_id="*")])
+    assert record["views"]["partitions"] == 2
