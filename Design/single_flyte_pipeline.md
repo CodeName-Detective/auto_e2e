@@ -266,7 +266,17 @@ Known gaps:
 | 5 | Evaluate every suite on every distinct checkpoint | — |
 | 6 | Register one model version per new distinct checkpoint | `epochs == 0` |
 | 7 | Verify lineage: `verify_lineage` recomputes every digest of the new models | — |
-| 8 | Precompute Console overlays for `best` (not implemented yet: the overlay inference path loads only the IL checkpoint format) | — |
+| 8 | Precompute Console overlays for `best` on the training dataset | no trained `best`, the dataset is not `kitscenes`, it has no Console publication (`unit_limit > 0`), or `runtime.artifacts_bucket` is empty |
+
+Stage 8 reuses `prepare_overlay_set`, `precompute_overlay_partition`, and
+`finalize_overlay_set`. Overlays are keyed by the checkpoint SHA-256 and the
+Console publication digest from the dataset lineage
+(`console.manifest_sha256`), which is why a build without a Console
+publication has none. The overlay metadata names the registry version
+(`models:/<model_id>`, numeric version, Ray run id) and the Ray validation
+ADE/FDE at 6.4 s; a model without them is refused rather than shown with
+0.0. `load_policy` rebuilds a Reactive checkpoint from its stage constructor
+with pretrained weights off, as the KITScenes benchmark evaluator does.
 
 `train_ray` is one task factory. `gpu_profile` picks the `RayJobConfig`,
 Kueue queue, priority class, and node selector from a single table. The task
