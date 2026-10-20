@@ -23,6 +23,7 @@ from flytekit.types.file import FlyteFile
 
 from Platform.pipelines.autoe2e_adapters import SourcePlan
 from Platform.pipelines.autoe2e_dataset import DatasetSpec, canonical_dataset_spec
+from Platform.pipelines.autoe2e_env import PIPELINE_ENV
 from Platform.pipelines.autoe2e_store import DatasetHandle
 from Platform.pipelines.autoe2e_tasks import build_dataset, plan_dataset, resolve_dataset
 from Platform.pipelines.distributed_training import (
@@ -190,7 +191,7 @@ def _execution_id() -> str:
 # --- datasets -----------------------------------------------------------------
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@dynamic(container_image=TRAINING_IMAGE, environment=PIPELINE_ENV)
 def ensure_dataset(
     spec: DatasetSpec,
     plan: SourcePlan,
@@ -207,7 +208,7 @@ def ensure_dataset(
     )
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@dynamic(container_image=TRAINING_IMAGE, environment=PIPELINE_ENV)
 def ensure_evaluation_datasets(evaluation: EvaluationSpec, runtime: RuntimeOptions) -> List[DatasetHandle]:
     handles = []
     for target in evaluation.targets:
@@ -411,7 +412,7 @@ def parent_as_checkpoints(parent: ParentHandle) -> TrainedCheckpoints:
     )
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@dynamic(container_image=TRAINING_IMAGE, environment=PIPELINE_ENV)
 def train(spec: TrainingSpec, dataset: DatasetHandle, parent: ParentHandle) -> TrainedCheckpoints:
     """Pick the Ray task for the GPU profile; the profile is the only queue choice."""
     if spec.epochs == 0:
@@ -734,7 +735,7 @@ def evaluate_kitscenes_benchmark(
     client.set_terminated(run_id)
 
 
-@dynamic(container_image=TRAINING_IMAGE)
+@dynamic(container_image=TRAINING_IMAGE, environment=PIPELINE_ENV)
 def evaluate(
     models: List[RegisteredModel],
     evaluation: EvaluationSpec,
