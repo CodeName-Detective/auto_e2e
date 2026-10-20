@@ -3,12 +3,14 @@
 Layout under ``s3://<bucket>/<dataset>/raw-snapshots/<revision>/<snapshot_id>/``::
 
     units/<unit_id>.tar      uncompressed tar, members "<unit_id>/<relative path>"
-    index/<unit_id>.parquet  one row per member: name, offset, size, sha256
+    index/<unit_id>.jsonl    one canonical JSON line per member: name, offset, size, sha256
     manifest.json            written last, write-once
 
 Tars are deterministic (sorted members, zeroed owner and mtime), so the same
-upstream files always give the same tar digest. A member is read with one
-ranged GET of ``[offset, offset + size)``; no extraction is needed.
+upstream files always give the same tar digest. The index is canonical JSON
+Lines, not Parquet, so its bytes do not depend on a library version and a
+write-once rerun reproduces them exactly. A member is read with one ranged GET
+of ``[offset, offset + size)``; no extraction is needed.
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ from Platform.pipelines.dataset_publication import canonical_json_bytes, sha256_
 
 
 SNAPSHOT_SCHEMA = "autoe2e_raw_snapshot_v1"
-INDEX_COLUMNS = ("name", "offset", "size", "sha256")
+INDEX_FIELDS = ("name", "offset", "size", "sha256")
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COPY_CHUNK = 8 * 1024**2
@@ -59,7 +61,7 @@ def unit_tar_key(prefix: str, unit_id: str) -> str:
 
 
 def unit_index_key(prefix: str, unit_id: str) -> str:
-    return f"{prefix}/index/{_segment(unit_id, 'unit id')}.parquet"
+    return f"{prefix}/index/{_segment(unit_id, 'unit id')}.jsonl"
 
 
 def manifest_key(prefix: str) -> str:
@@ -121,14 +123,27 @@ class _HashingReader(io.RawIOBase):
         return True
 
     def read(self, size: int = -1) -> bytes:
+        """Return exactly ``size`` bytes unless the source truly ends.
+
+        tarfile treats a short read as end of data, but sockets and fsspec
+        streams return short reads legitimately, so keep reading.
+        """
         if self._remaining <= 0:
             return b""
         size = self._remaining if size < 0 else min(size, self._remaining)
-        chunk = self._stream.read(size)
-        self._remaining -= len(chunk)
-        self.read_bytes += len(chunk)
-        self._digest.update(chunk)
-        return chunk
+        parts = []
+        wanted = size
+        while wanted:
+            chunk = self._stream.read(wanted)
+            if not chunk:
+                break
+            parts.append(chunk)
+            wanted -= len(chunk)
+        data = b"".join(parts)
+        self._remaining -= len(data)
+        self.read_bytes += len(data)
+        self._digest.update(data)
+        return data
 
 
 def index_tar(stream: IO[bytes]) -> list[MemberRef]:
@@ -140,8 +155,12 @@ def index_tar(stream: IO[bytes]) -> list[MemberRef]:
     members: list[MemberRef] = []
     with tarfile.open(fileobj=stream, mode="r|") as tar:
         for info in tar:
-            if not info.isfile():
+            if info.isdir():
                 continue
+            if not info.isreg() or info.issparse():
+                raise ValueError(
+                    f"{info.name}: only regular, non-sparse members can be indexed"
+                )
             handle = tar.extractfile(info)
             assert handle is not None
             digest = hashlib.sha256()
@@ -156,54 +175,52 @@ def index_tar(stream: IO[bytes]) -> list[MemberRef]:
     return members
 
 
-def index_table(members: Sequence[MemberRef]):
-    import pyarrow as pa
-
-    names = [member.name for member in members]
+def index_bytes(members: Sequence[MemberRef]) -> bytes:
+    """Serialize an index as canonical JSON Lines sorted by member name."""
+    ordered = sorted(members, key=lambda m: m.name)
+    names = [member.name for member in ordered]
     if len(set(names)) != len(names):
         raise ValueError("tar lists a member twice")
-    if any(member.offset < 0 for member in members):
+    if any(member.offset < 0 for member in ordered):
         raise ValueError("index offsets must come from index_tar")
-    return pa.table({
-        "name": pa.array(names, pa.string()),
-        "offset": pa.array([m.offset for m in members], pa.int64()),
-        "size": pa.array([m.size for m in members], pa.int64()),
-        "sha256": pa.array([m.sha256 for m in members], pa.string()),
-    })
-
-
-def index_bytes(members: Sequence[MemberRef]) -> bytes:
-    """Serialize an index deterministically so its digest is stable."""
-    import pyarrow.parquet as pq
-
-    out = io.BytesIO()
-    pq.write_table(
-        index_table(sorted(members, key=lambda m: m.name)),
-        out,
-        compression="zstd",
-        write_statistics=False,
-        store_schema=False,
+    return b"".join(
+        canonical_json_bytes({
+            "name": m.name, "offset": m.offset, "size": m.size, "sha256": m.sha256,
+        }) + b"\n"
+        for m in ordered
     )
-    return out.getvalue()
 
 
 def read_index(payload: bytes) -> list[MemberRef]:
-    import pyarrow.parquet as pq
+    import json
 
-    table = pq.read_table(io.BytesIO(payload))
-    if tuple(table.column_names) != INDEX_COLUMNS:
-        raise ValueError(f"index columns {table.column_names} != {INDEX_COLUMNS}")
-    rows = table.to_pydict()
-    return [
-        MemberRef(name, int(offset), int(size), sha)
-        for name, offset, size, sha in zip(
-            rows["name"], rows["offset"], rows["size"], rows["sha256"]
-        )
-    ]
+    members = []
+    for line in payload.splitlines():
+        row = json.loads(line)
+        if tuple(sorted(row)) != tuple(sorted(INDEX_FIELDS)):
+            raise ValueError(f"index row fields {sorted(row)} != {sorted(INDEX_FIELDS)}")
+        members.append(MemberRef(row["name"], int(row["offset"]), int(row["size"]), row["sha256"]))
+    if index_bytes(members) != payload:
+        raise ValueError("snapshot index is not canonical")
+    return members
 
 
-def read_member(s3, bucket: str, key: str, member: MemberRef, *, verify: bool = True) -> bytes:
-    """Fetch one member with a single ranged GET."""
+def read_member(
+    s3,
+    bucket: str,
+    key: str,
+    member: MemberRef,
+    *,
+    verify: bool = True,
+    max_bytes: int = 1024**3,
+) -> bytes:
+    """Fetch one member into memory with a single ranged GET.
+
+    Members above ``max_bytes`` must be streamed by the caller instead, so a
+    multi-gigabyte member never silently exhausts pod memory.
+    """
+    if member.size > max_bytes:
+        raise ValueError(f"{member.name}: {member.size} bytes exceeds max_bytes {max_bytes}")
     if member.size == 0:
         payload = b""
     else:
