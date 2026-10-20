@@ -335,6 +335,13 @@ class TestTrajectoryImitationLoss:
         assert selected == reordered
         assert selected == tuple(sorted(selected))
         assert len(selected) == 2
+        relabelled = validation_group_uids(
+            groups,
+            val_fraction=0.1,
+            policy=policy,
+            **{**provenance, "packed_dataset_version": "v9.9"},
+        )
+        assert relabelled == selected
 
     def test_kitscenes_subset_scope_rejects_full_corpus(self):
         policy = training_policy_for_dataset(
@@ -372,7 +379,6 @@ class TestTrajectoryImitationLoss:
         ("field", "invalid_value", "message"),
         (
             ("source_revision", "wrong-revision", "source revision"),
-            ("packed_dataset_version", "v0", "dataset version"),
             ("packed_contract_digest", "wrong-contract", "contract digest"),
         ),
     )
