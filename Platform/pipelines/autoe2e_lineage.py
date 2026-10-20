@@ -123,6 +123,7 @@ def dataset_lineage(
     console: Optional[Mapping[str, Any]],
     pack: Mapping[str, Any],
     build: Mapping[str, Any],
+    packed_reasoning_labels: Optional[int] = None,
 ) -> tuple[dict[str, Any], bytes]:
     """Return ``(dataset.json record, units.jsonl bytes)``."""
     from Platform.pipelines.autoe2e_labels import label_set_sha256
@@ -167,9 +168,13 @@ def dataset_lineage(
         "console": None if console is None else dict(console),
         "pack": dict(pack),
         "build": dict(build),
+        # reasoning_labels counts teacher records; packed_reasoning_labels counts
+        # the samples that actually carry one after the pack JOIN, so a parser
+        # change that drops labelled frames shows up as a gap between the two.
         "totals": {
             "samples": sum(u.sample_count for u in units),
             "reasoning_labels": sum(u.label_count for u in units),
+            "packed_reasoning_labels": packed_reasoning_labels,
         },
     }
     return record, payload
