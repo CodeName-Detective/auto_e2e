@@ -546,3 +546,16 @@ def test_load_policy_rebuilds_reactive_checkpoints_from_their_stage(
     load_policy(checkpoint, "cpu")
 
     assert seen == {"is_pretrained": False, "stage": "kitscenes_finetune"}
+
+
+def test_reactive_policy_kwargs_use_the_stage_constructor_not_the_saved_config():
+    from Platform.pipelines.inference import reactive_policy_kwargs
+    from training.reactive_multitask import ReactiveTrainingStage, reactive_model_kwargs
+
+    config = {"training_stage": "kitscenes_finetune", "backbone": "res_net_50", "embed_dim": 256,
+              "num_views": 6, "is_pretrained": True, "map_context_channels": 3}
+    kwargs = reactive_policy_kwargs(config)
+    assert kwargs == {
+        "backbone": "res_net_50", "embed_dim": 256, "is_pretrained": False,
+        **reactive_model_kwargs(ReactiveTrainingStage.KITSCENES_FINETUNE, num_views=6),
+    }
