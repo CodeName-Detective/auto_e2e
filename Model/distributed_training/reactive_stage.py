@@ -6267,9 +6267,16 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "final Reactive checkpoint does not match epoch history"
         )
+    final_checkpoint_uri = normalize_ray_checkpoint_uri(
+        str(result.checkpoint.path),
+        str(config["storage_path"]),
+    )
     return {
         "checkpoint_file_uri": f"{checkpoint_uri}/checkpoint.pt",
         "checkpoint_uri": checkpoint_uri,
+        "final_checkpoint_file_uri": f"{final_checkpoint_uri}/checkpoint.pt",
+        "final_checkpoint_uri": final_checkpoint_uri,
+        "final_epoch": int(history[-1]["epoch"]),
         "final_metrics": final_metrics,
         "history": history,
         "metrics": metrics,
