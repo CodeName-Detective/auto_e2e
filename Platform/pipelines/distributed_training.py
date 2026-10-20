@@ -383,6 +383,9 @@ class ReactiveRayOutput(NamedTuple):
     metadata: FlyteFile
     checkpoint_uri: str
     checkpoint_sha256: str
+    final_checkpoint: FlyteFile
+    final_checkpoint_uri: str
+    final_checkpoint_sha256: str
 
 
 class ReactiveDistributedProgramOutput(NamedTuple):
@@ -1733,6 +1736,9 @@ def _run_reactive_stage_task(
         metadata=FlyteFile(str(metadata_path)),
         checkpoint_uri=str(result["checkpoint_file_uri"]),
         checkpoint_sha256=str(metrics["checkpoint_sha256"]),
+        final_checkpoint=FlyteFile(result["final_checkpoint_file_uri"]),
+        final_checkpoint_uri=str(result["final_checkpoint_file_uri"]),
+        final_checkpoint_sha256=str(result["final_metrics"]["checkpoint_sha256"]),
     )
 
 
