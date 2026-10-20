@@ -11,7 +11,7 @@ from botocore.exceptions import ClientError
 
 from Platform.pipelines.autoe2e_adapters import SourcePlan, UnitRef
 from Platform.pipelines.autoe2e_dataset import AutoE2EDataset
-from Platform.pipelines.autoe2e_snapshot import index_tar, read_index, snapshot_prefix, unit_tar_key, write_unit_tar
+from Platform.pipelines.autoe2e_snapshot import read_index, snapshot_prefix, unit_tar_key, write_unit_tar
 from Platform.pipelines.dataset_publication import sha256_bytes
 
 BUCKET = "datasets"
