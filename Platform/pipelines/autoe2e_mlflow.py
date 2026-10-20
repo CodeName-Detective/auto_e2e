@@ -179,6 +179,22 @@ def ensure_logged_model(
     return client.get_logged_model(model.model_id)
 
 
+MODEL_VERSIONS_TAG = "mlflow.modelVersions"
+
+
+def link_version(client, *, model_id: str, version: str) -> None:
+    """Record the registry version on the LoggedModel, as register_model does.
+
+    The UI shows a model's versions from this tag; create_model_version alone
+    does not write it, so a version made that way looked unregistered.
+    """
+    model = client.get_logged_model(model_id)
+    entry = {"name": REGISTERED_MODEL, "version": str(version)}
+    existing = json.loads(model.tags.get(MODEL_VERSIONS_TAG, "[]"))
+    if entry not in existing:
+        client.set_logged_model_tags(model_id, {MODEL_VERSIONS_TAG: json.dumps(existing + [entry])})
+
+
 def ensure_version(client, *, model, run_id: Optional[str]) -> str:
     """Register a LoggedModel once; one version per checkpoint across executions."""
     from mlflow.exceptions import MlflowException
@@ -204,6 +220,7 @@ def ensure_version(client, *, model, run_id: Optional[str]) -> str:
     if found:
         if found[0].source != source:
             raise RuntimeError(f"version {found[0].version} for {sha} points at {found[0].source}")
+        link_version(client, model_id=model.model_id, version=str(found[0].version))
         return str(found[0].version)
     tags = {key: model.params[key] for key in IDENTITY_KEYS if key in model.params}
     created = client.create_model_version(
@@ -213,6 +230,7 @@ def ensure_version(client, *, model, run_id: Optional[str]) -> str:
         tags=tags,
         description=model.tags.get(DESCRIPTION_TAG, ""),
     )
+    link_version(client, model_id=model.model_id, version=str(created.version))
     return str(created.version)
 
 
