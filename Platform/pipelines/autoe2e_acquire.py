@@ -82,8 +82,9 @@ class AcquisitionPlan:
 
 def _s3():
     import boto3
+    from botocore.config import Config
 
-    return boto3.client("s3", region_name=AWS_REGION)
+    return boto3.client("s3", region_name=AWS_REGION, config=Config(max_pool_connections=96))
 
 
 def _sha256_file(path: Path) -> str:
@@ -147,14 +148,29 @@ def upload_unit(s3, *, bucket: str, prefix: str, unit_id: str, tar_path: Path, m
     return UnitEntry(**{k: entry[k] for k in UnitEntry.__dataclass_fields__})
 
 
-def _download_prefix(s3, uri: str, root: Path) -> None:
+def _download_prefix(s3, uri: str, root: Path, workers: int = 64) -> None:
+    """Download every object under ``uri`` into ``root`` in parallel.
+
+    A KITScenes scene is about 17,000 objects; one GET at a time took most of
+    an hour per scene.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
     from Platform.pipelines.dataset_publication_tasks import _list_objects
 
     bucket, key_prefix = _split_s3_uri(uri)
-    for item in _list_objects(s3, bucket, key_prefix):
+    items = _list_objects(s3, bucket, key_prefix)
+    for item in items:
+        root.joinpath(*item["relative"].split("/")).parent.mkdir(parents=True, exist_ok=True)
+
+    def fetch(item):
         target = root.joinpath(*item["relative"].split("/"))
-        target.parent.mkdir(parents=True, exist_ok=True)
         s3.download_file(bucket, item["key"], str(target))
+        if target.stat().st_size != item["size"]:
+            raise IOError(f"short download of s3://{bucket}/{item['key']}")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(fetch, items))
 
 
 @task(
