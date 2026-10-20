@@ -257,7 +257,8 @@ def test_overlay_metadata_names_the_registered_version_and_validation_metrics():
     model = RegisteredModel("best", "m-abc", "71", "s3://ckpt/autoe2e/checkpoints/x.pt", "c" * 64, "l" * 64)
     metadata = overlay_metadata(
         model=model, run_id="r" * 32, dataset_source="KIT-MRT/KITScenes-Multimodal", dataset_version="v3.7",
-        training=TrainingSpec(), metrics_json='{"ade_6p4s_m": 2.5, "fde_6p4s_m": 6.0, "route": {"x": 1}}',
+        training=TrainingSpec(),
+        metrics_json='{"validation_ade_6p4s_m": 2.5, "validation_fde_6p4s_m": 6.0, "route": {"x": 1}}',
         execution_id="exec",
     )
     assert metadata["registered_model_name"] == "auto-e2e-driving-policy"
@@ -265,6 +266,9 @@ def test_overlay_metadata_names_the_registered_version_and_validation_metrics():
     assert metadata["artifact_uri"] == "models:/m-abc"
     assert (metadata["eval_ade"], metadata["eval_fde"]) == (2.5, 6.0)
     assert metadata["checkpoint_sha256"] == "c" * 64
+    with pytest.raises(ValueError, match="validation ADE"):
+        overlay_metadata(model=model, run_id="r" * 32, dataset_source="d", dataset_version="v3.7",
+                         training=TrainingSpec(), metrics_json='{"bev_iou": 0.3}', execution_id="exec")
 
 
 def test_overlays_need_a_console_publication(monkeypatch):
