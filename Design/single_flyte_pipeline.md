@@ -266,9 +266,10 @@ and `training` as unknown instead of guessing them.
 
 ## 6. Traceability in MLflow
 
-MLflow 3 tracks models as first-class LoggedModels, separate from runs. This
-design puts everything about a checkpoint on its LoggedModel, so the model
-registry page answers every question without opening a run.
+MLflow 3 tracks models as first-class LoggedModels, separate from runs. A
+run keeps only what MLflow and the training loop record on their own. The
+`best` and `final` LoggedModels hold everything else, and the LoggedModel
+page is where a checkpoint is read.
 
 ```
 parent LoggedModel ──input──► training run ──output──► LoggedModel (best) ◄── version N
@@ -279,19 +280,37 @@ evaluation dataset ──input──► evaluation run ──metrics────
 
 | MLflow object | Created by | Holds |
 |---|---|---|
-| LoggedModel, one per distinct checkpoint | stage 6 with `initialize_logged_model(source_run_id=training run)` | params: flattened `DatasetSpec`, `TrainingSpec`, `gpu_profile`. tags: `checkpoint_sha256`, `checkpoint_role`, `lineage_sha256`, `dataset_id`, `dataset_lineage_sha256`, `parent_model_id`, `stage_index`, image digests, git commit. artifacts: the checkpoint, its checkpoint lineage, the dataset lineage copies, and its evaluation records |
-| Model version | `create_model_version(model_id=…)` | the same tags, so the registry list can be filtered on them |
-| Training run | stage 4 | training curves, Flyte execution id, Kueue queue, capacity reservation id. inputs: the training dataset (`training`) and the parent LoggedModel. outputs: the new LoggedModels |
-| Evaluation run, one per execution of stage 5 | stage 5 | inputs: the LoggedModel and each evaluation dataset (`eval:<suite>`) |
+| Training run | stage 4 | training curves, system metrics, Flyte execution id. inputs: the training dataset (`training`) and the parent LoggedModel. outputs: the new LoggedModels. No artifacts |
+| Evaluation run, one per execution of stage 5 | stage 5 | inputs: the LoggedModel and each evaluation dataset (`eval:<suite>`). No artifacts |
+| LoggedModel, one per distinct checkpoint | stage 6 with `initialize_logged_model(source_run_id=training run)` | params (6.0), description (6.0), metrics, and artifacts: the checkpoint, its checkpoint lineage, the dataset lineage copies, and its evaluation records |
 | Metrics | `log_metric(model_id=…, dataset=…)` | every evaluation metric, attached to the LoggedModel and the MLflow Dataset it was measured on |
-| MLflow Dataset | `log_input` | name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, and a profile with `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and totals |
+| Model version | `create_model_version(source="models:/<model_id>", run_id=…)` | a pointer to the LoggedModel, plus the identity tags for registry search |
+| MLflow Dataset | `log_input` with `AutoE2EDataset` (6.0) | name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, and a profile with the lineage summary |
 
 Because metrics carry the dataset, the same metric name measured on two
 evaluation datasets stays two results, and an evaluation added a month later
-appears next to the original ones on the model page.
-`search_logged_models(datasets=[…])` lists every model evaluated on a given
-dataset, and the parent input on each training run makes the stage chain a
-graph that MLflow itself stores.
+appears next to the original ones on the LoggedModel page.
+`search_logged_models(datasets=[{"dataset_name": …, "dataset_digest": …}])`
+lists every model evaluated on a given dataset; the digest is required for
+a match. The parent input on each training run makes the stage chain a graph
+that MLflow itself stores.
+
+### 6.0 Constraints found on the production server
+
+A probe against the production MLflow 3.13.0 on 2026-10-20 created a
+LoggedModel, dataset-tied metrics, a parent input, and a registered version,
+then removed them. It settled three placement choices:
+
+| Finding | Consequence |
+|---|---|
+| The LoggedModel page shows metrics with their dataset and source run, params, runs, datasets used, model versions, and artifacts, but not tags | Every lineage digest is a param: `checkpoint_sha256`, `checkpoint_role`, `lineage_sha256`, `dataset_id`, `dataset_lineage_sha256`, `parent_model_id`, `stage_index`, image digests, and git commit, next to the flattened `DatasetSpec` and `TrainingSpec`. Params are write-once, which fits immutable identity. The description is generated Markdown that links the parent model page, the published dataset, and the evaluation records |
+| The OSS registry has no `model_id` column; a version links to a LoggedModel only through `source="models:/<model_id>"` | Versions are created with that source and the training run id. The same identity values are also set as version tags, because the registry list filters on tags and not on LoggedModel params |
+| `MetaDataset` does not serialize a profile | `AutoE2EDataset` subclasses `MetaDataset` and adds `profile` to `to_dict()` as JSON: `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and sample and shard totals |
+
+Cleanup of a probe must delete objects by id. `mlflow gc` without
+`--run-ids` permanently deletes every run in the deleted lifecycle stage of
+the whole server, not only the given experiment; the probe cleanup did this
+and purged four unrelated runs that were already in the trash.
 
 ### 6.1 Lineage records
 
@@ -414,7 +433,7 @@ All answers start from the model version page and stay inside MLflow.
 | Which data trained this checkpoint? | the training dataset input and its profile; `lineage/datasets/<dataset_id>/dataset.json` |
 | Which raw bytes and upstream revision? | dataset lineage `raw`, and `units.parquet` tar digests per unit |
 | Which labels, from which teacher and prompt? | dataset lineage `spec.reasoning` and `labels`; `units.parquet` names every label record |
-| Which code packed and trained it? | dataset lineage `pack`; LoggedModel tags for the training image and commit |
+| Which code packed and trained it? | dataset lineage `pack`; LoggedModel params for the training image and commit |
 | What was it initialized from? | `parent_model_id`, which links to the parent's model page, recursively |
 | Every evaluation ever run on it, and on which data? | the LoggedModel metrics, each tied to its evaluation dataset, and `evaluations/` |
 
