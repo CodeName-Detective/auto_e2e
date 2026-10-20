@@ -11,7 +11,7 @@ RUN apt-get update \
 
 RUN pip install --no-cache-dir \
     timm==1.0.27 \
-    mlflow-skinny==2.22.0 \
+    mlflow-skinny==3.13.0 \
     webdataset \
     flytekit==1.16.24 \
     flytekitplugins-ray==1.16.24 \
