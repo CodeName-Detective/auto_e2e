@@ -299,8 +299,13 @@ downstream.
 | evaluation record | stage 5 | MLflow run artifact `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` | checkpoint, suite, and evaluation dataset |
 
 A dataset lineage is shared by every checkpoint trained on that dataset, so
-it lives with the publication in S3. Checkpoint lineage and evaluation
-records live on the MLflow run. Evaluation records are only ever added, so a
+its canonical copy lives with the publication in S3. Every run that uses a
+dataset, for training or evaluation, also stores byte-identical copies of
+`dataset.json` and `units.parquet` under
+`lineage/datasets/<dataset_id>/`. The copies are checked against the
+recorded SHA-256, so the hash chain holds, and MLflow alone stays enough to
+trace a checkpoint even if the S3 publication is gone. Checkpoint lineage
+and evaluation records live only on the MLflow run. Evaluation records are only ever added, so a
 checkpoint's history is the set of its records, and no earlier record is
 rewritten.
 
@@ -388,8 +393,8 @@ one.
 | version tag | `lineage_sha256` | checkpoint lineage digest |
 | version tag | `dataset_id`, `dataset_lineage_sha256` | from the checkpoint lineage |
 | version tag | `eval.<suite>@<dataset>.<metric>` | headline metrics, copied from evaluation records |
-| run input | `mlflow.log_input` | digest `dataset_id`, source the by-id index URI, context `training` or `eval:<suite>` |
-| run artifacts | `lineage/`, `evaluations/` | the records themselves |
+| run input | `mlflow.log_input` | an MLflow Dataset with name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, context `training` or `eval:<suite>`, and a profile holding `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and sample and shard totals |
+| run artifacts | `lineage/`, `lineage/datasets/`, `evaluations/` | the records themselves, including copies of every dataset lineage the run used |
 
 #### Verification
 
