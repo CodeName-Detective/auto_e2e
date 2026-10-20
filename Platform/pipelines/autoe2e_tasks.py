@@ -9,6 +9,7 @@ from typing import List
 from flytekit import Resources, task
 
 from Platform.pipelines.autoe2e_dataset import (
+    AutoE2EDataset,
     DatasetSpec,
     compute_dataset_id,
     dataset_index_key,
@@ -16,6 +17,13 @@ from Platform.pipelines.autoe2e_dataset import (
     next_dataset_version,
     validate_dataset_index_record,
     validate_publication,
+)
+from Platform.pipelines.autoe2e_stages import (
+    SceneStage,
+    stage_id,
+    stage_record,
+    stage_record_key,
+    validate_stage_record,
 )
 from Platform.pipelines.dataset_publication import (
     DatasetPublication,
@@ -25,7 +33,9 @@ from Platform.pipelines.dataset_publication_tasks import (
     DATA_PREP_IMAGE,
     _get_bytes,
     _is_not_found,
+    _list_objects,
     _put_immutable,
+    _split_s3_uri,
 )
 
 
@@ -135,6 +145,65 @@ def write_dataset_index(
         manifest_sha256=publication.manifest_sha256,
     )
     key = dataset_index_key(spec.dataset, record["dataset_id"])
+    _put_immutable(
+        s3,
+        bucket=bucket,
+        key=key,
+        payload=canonical_json_bytes(record, pretty=True),
+        content_type="application/json",
+    )
+    return key
+
+
+def _artifact_objects(s3, artifact_uri: str) -> list[dict]:
+    bucket, prefix = _split_s3_uri(artifact_uri)
+    return _list_objects(s3, bucket, prefix)
+
+
+def lookup_scene_stage(
+    s3,
+    *,
+    bucket: str,
+    dataset: AutoE2EDataset,
+    stage: SceneStage,
+    identity: dict,
+) -> str | None:
+    """Return the recorded artifact URI for a scene stage, or None.
+
+    A record whose artifact listing changed raises instead of returning None,
+    so a damaged artifact is never silently replaced by a new download or a
+    new teacher call.
+    """
+    payload = _get_optional(
+        s3, bucket, stage_record_key(dataset, stage, stage_id(identity))
+    )
+    if payload is None:
+        return None
+    record = json.loads(payload)
+    validate_stage_record(
+        record,
+        identity,
+        objects=_artifact_objects(s3, record["artifact_uri"]),
+    )
+    return record["artifact_uri"]
+
+
+def record_scene_stage(
+    s3,
+    *,
+    bucket: str,
+    dataset: AutoE2EDataset,
+    stage: SceneStage,
+    identity: dict,
+    artifact_uri: str,
+) -> str:
+    """Write the write-once record for an artifact a build just produced."""
+    record = stage_record(
+        identity,
+        artifact_uri=artifact_uri.rstrip("/"),
+        objects=_artifact_objects(s3, artifact_uri),
+    )
+    key = stage_record_key(dataset, stage, record["stage_id"])
     _put_immutable(
         s3,
         bucket=bucket,
