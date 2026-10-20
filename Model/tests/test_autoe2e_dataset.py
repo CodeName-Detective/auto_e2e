@@ -29,9 +29,8 @@ from Platform.pipelines.dataset_publication import (
 def _spec(**overrides) -> DatasetSpec:
     values = dict(
         dataset=AutoE2EDataset.KITSCENES,
-        source_revision="6fde0034446669e2ed7235e4c7fe323cd23d599d",
-        split_manifest=ManifestRef(
-            uri="s3://checkpoints/recovery-manifests/a.json",
+        source_manifest=ManifestRef(
+            uri="s3://datasets/kitscenes/raw-snapshots/rev/snap/manifest.json",
             version_id="zpW2",
             sha256="a" * 64,
         ),
@@ -75,7 +74,8 @@ def test_dataset_id_is_stable_and_hex():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"source_revision": "other"},
+        {"unit_limit": 10},
+        {"pack_params": {"partition_size": "4"}},
         {"pack_version": "v3.4"},
         {"image_size": 512},
         {"reasoning": None},
@@ -86,22 +86,30 @@ def test_dataset_id_changes_with_every_identity_field(overrides):
     assert compute_dataset_id(_spec(**overrides)) != compute_dataset_id(_spec())
 
 
-def test_dataset_id_changes_with_split_manifest_digest():
-    ref = dataclasses.replace(_spec().split_manifest, sha256="b" * 64)
-    assert compute_dataset_id(_spec(split_manifest=ref)) != compute_dataset_id(
+def test_dataset_id_changes_with_source_manifest_digest():
+    ref = dataclasses.replace(_spec().source_manifest, sha256="b" * 64)
+    assert compute_dataset_id(_spec(source_manifest=ref)) != compute_dataset_id(
         _spec()
     )
+
+
+def test_pack_params_order_does_not_change_the_id():
+    a = _spec(pack_params={"a": "1", "b": "2"})
+    b = _spec(pack_params={"b": "2", "a": "1"})
+    assert compute_dataset_id(a) == compute_dataset_id(b)
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"source_revision": ""},
+        {"unit_limit": -1},
+        {"pack_params": {"": "x"}},
+        {"pack_params": {"k": 1}},
         {"pack_version": ""},
         {"image_size": 0},
-        {"split_manifest": ManifestRef(uri="https://x/a.json", version_id="v", sha256="a" * 64)},
-        {"split_manifest": ManifestRef(uri="s3://b/a.json", version_id="", sha256="a" * 64)},
-        {"split_manifest": ManifestRef(uri="s3://b/a.json", version_id="v", sha256="A" * 64)},
+        {"source_manifest": ManifestRef(uri="https://x/a.json", version_id="v", sha256="a" * 64)},
+        {"source_manifest": ManifestRef(uri="s3://b/a.json", version_id="", sha256="a" * 64)},
+        {"source_manifest": ManifestRef(uri="s3://b/a.json", version_id="v", sha256="A" * 64)},
         {"reasoning": ReasoningSpec(teacher="t", prompt_version="p", label_stride=0)},
     ],
 )
