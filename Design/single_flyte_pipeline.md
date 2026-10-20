@@ -152,8 +152,49 @@ This stage reuses the existing tasks:
 
 Then it calls `publish_dataset_partition` and `finalize_dataset_publication`
 under the allocated version, and `record_dataset_index` writes the by-id
-index and re-resolves the result through the same validation. Per-partition Flyte cache stays enabled, so a
-failed build resumes from finished partitions.
+index and re-resolves the result through the same validation.
+
+#### Scene stage store
+
+Ingest and reasoning labeling are the expensive stages: one KITScenes scene
+is about 17,000 raw files and 3.3 GB, and labels are billed Cosmos calls.
+Their outputs do not depend on the pack contract, so a new `pack_version`,
+`SHARD_SCHEMA_VERSION`, `GEOMETRY_VERSION`, or `PARSER_VERSION` must never
+repeat them. Today the ingest cache key contains `PARSER_VERSION`, so the
+v2 to v3 bump on 2026-07-25 made every scene look un-ingested.
+
+Each scene therefore gets two stage identities that are independent of the
+pack:
+
+| Stage | Identity fields | Not included |
+|---|---|---|
+| raw | dataset, `source_revision`, scene id | any parser, shard, or geometry version |
+| labels | raw identity, teacher, `prompt_version`, `label_stride`, `REASONING_LABEL_POLICY_VERSION`, `UID_SCHEMA_VERSION` | parser, shard, and geometry versions |
+
+A write-once record per scene and stage lives at
+`s3://<datasets_bucket>/<dataset>/_stages/<stage>/<stage_id>.json`. It holds
+the artifact URI, the object count, the total size, and a digest over every
+object's relative key, size, and ETag. Before a build uses a record, it lists
+the artifact and compares the digest. A mismatch fails the execution instead
+of silently re-ingesting or re-labeling.
+
+The build looks up both records for every scene first. It runs ingest only
+for scenes without a raw record and labeling only for scenes without a label
+record, then writes the records for what it produced. Pack and publication
+always run from those artifacts.
+
+A parser change can change which frames exist, but it does not re-label. The
+pack JOIN already treats a sample without a label as fully masked, and the
+publication records `reasoning_label_count`, so lost coverage is visible
+instead of silently re-billed.
+
+The 533 KITScenes scenes from Full Run `a5nk56zsbcg7g6npjfpt` are adopted
+once, without copying, by
+`Platform/scripts/adopt_kitscenes_recovery_stages.py`. It reads the
+`raw_uri` and `label_uri` of each entry in the frozen recovery manifest,
+checks the label `meta.json` against the label identity, and writes the stage
+records. After that, the first `wf_autoe2e` KITScenes run ingests and labels
+nothing.
 
 ### 4.3 Resolve parent
 
