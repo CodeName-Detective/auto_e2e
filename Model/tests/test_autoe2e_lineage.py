@@ -32,7 +32,7 @@ def _unit(unit_id="a", **overrides):
         raw_index_sha256=H("2"),
         label_id=H("3"),
         label_record_sha256=H("4"),
-        label_origin="reused",
+        label_origin="adopted",
         sample_count=10,
         label_count=2,
     )
@@ -112,9 +112,9 @@ def test_duplicate_units_are_rejected():
 def test_dataset_lineage_summarizes_labels_and_pins_units():
     record, payload = _dataset()
     assert record["schema_version"] == DATASET_LINEAGE_SCHEMA
-    assert record["labels"]["reused"] == 1 and record["labels"]["created"] == 1
+    assert record["labels"]["adopted"] == 1 and record["labels"]["created"] == 1
     assert record["units"]["rows"] == 2
-    assert record["totals"] == {"samples": 20, "reasoning_labels": 4}
+    assert record["totals"] == {"samples": 20, "reasoning_labels": 4, "packed_reasoning_labels": None}
     from Platform.pipelines.dataset_publication import sha256_bytes
 
     assert record["units"]["sha256"] == sha256_bytes(payload)
@@ -122,7 +122,7 @@ def test_dataset_lineage_summarizes_labels_and_pins_units():
 
 def test_label_set_digest_ignores_label_origin():
     a, _ = _dataset([_unit("a", label_origin="created")])
-    b, _ = _dataset([_unit("a", label_origin="reused")])
+    b, _ = _dataset([_unit("a", label_origin="adopted")])
     assert a["labels"]["label_set_sha256"] == b["labels"]["label_set_sha256"]
 
 
