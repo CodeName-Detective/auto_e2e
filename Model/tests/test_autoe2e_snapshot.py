@@ -92,6 +92,48 @@ def test_index_round_trips_and_is_deterministic():
     assert read_index(encoded) == sorted(members, key=lambda m: m.name)
 
 
+def test_index_is_canonical_jsonl_without_library_metadata():
+    payload, _ = _tar()
+    encoded = index_bytes(index_tar(io.BytesIO(payload)))
+    assert encoded.endswith(b"\n") and encoded.startswith(b"{\"name\"")
+    with pytest.raises(ValueError, match="canonical"):
+        read_index(encoded.replace(b'{"name"', b'{ "name"', 1))
+
+
+def test_short_reads_from_the_source_stream_are_tolerated():
+    class Trickle(io.RawIOBase):
+        def __init__(self, body):
+            self.body = io.BytesIO(body)
+
+        def readable(self):
+            return True
+
+        def read(self, size=-1):
+            return self.body.read(min(7, size if size >= 0 else 7))
+
+    body = bytes(range(256)) * 40
+    out = io.BytesIO()
+    write_unit_tar(out, "u", [("a.bin", len(body), Trickle(body))])
+    member = index_tar(io.BytesIO(out.getvalue()))[0]
+    assert out.getvalue()[member.offset:member.offset + member.size] == body
+
+
+def test_symlinks_and_sparse_members_are_not_indexed():
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w") as tar:
+        link = tarfile.TarInfo("u/link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "u/target"
+        tar.addfile(link)
+    with pytest.raises(ValueError, match="regular"):
+        index_tar(io.BytesIO(out.getvalue()))
+
+
+def test_large_members_are_refused_in_memory():
+    with pytest.raises(ValueError, match="max_bytes"):
+        read_member(_RangeS3(b""), "b", "k", MemberRef("u/a", 512, 10, "a" * 64), max_bytes=5)
+
+
 def test_index_rejects_duplicate_names():
     member = MemberRef("u/a", 512, 1, "a" * 64)
     with pytest.raises(ValueError, match="twice"):
