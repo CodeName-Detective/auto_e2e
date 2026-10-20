@@ -159,15 +159,17 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
         raise ValueError(f"{dataset_id}: raw snapshot manifest changed")
     snapshot = json.loads(manifest)
     # autoe2e snapshots list units; the nuPlan snapshot lists archives.
-    tar_digests = {u["unit_id"]: u["tar_sha256"] for u in snapshot.get("units", [])}
-    tar_digests.update({a["archive_id"]: a["sha256"] for a in snapshot.get("archives", [])})
+    from Platform.pipelines.autoe2e_adapters import nuplan_archive_digest
+
+    tar_digests = {u["unit_id"]: f"sha256:{u['tar_sha256']}" for u in snapshot.get("units", [])}
+    tar_digests.update({a["archive_id"]: nuplan_archive_digest(a) for a in snapshot.get("archives", [])})
     bucket = units_uri.split("/")[2]
     views_key = lineage["views"]["key"]
     if sha256_bytes(s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()) != lineage["views"]["sha256"]:
         raise ValueError(f"{dataset_id}: partition views manifest changed")
     labels_checked = 0
     for unit in units:
-        if tar_digests and tar_digests.get(unit.unit_id) != unit.raw_tar_sha256:
+        if tar_digests and tar_digests.get(unit.unit_id) != unit.raw_tar_digest:
             raise ValueError(f"{dataset_id}: {unit.unit_id} raw tar digest differs from the snapshot")
         if unit.label_id is not None:
             from Platform.pipelines.autoe2e_dataset import AutoE2EDataset
