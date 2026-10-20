@@ -114,10 +114,31 @@ def compute_dataset_id(spec: DatasetSpec) -> str:
     return sha256_bytes(canonical_json_bytes(canonical_dataset_spec(spec)))
 
 
-def dataset_index_key(dataset: AutoE2EDataset, dataset_id: str) -> str:
+def dataset_index_key(published_name: str, dataset_id: str) -> str:
     if not _SHA256_RE.fullmatch(dataset_id):
         raise ValueError(f"invalid dataset id {dataset_id!r}")
-    return f"{dataset.value}/by-id/{dataset_id}.json"
+    dataset_prefix(published_name, "v1")
+    return f"{published_name}/by-id/{dataset_id}.json"
+
+
+def build_reservation_key(published_name: str, dataset_id: str) -> str:
+    if not _SHA256_RE.fullmatch(dataset_id):
+        raise ValueError(f"invalid dataset id {dataset_id!r}")
+    dataset_prefix(published_name, "v1")
+    return f"{published_name}/_stages/builds/{dataset_id}.json"
+
+
+def version_reservation_key(published_name: str, version: str) -> str:
+    dataset_prefix(published_name, version)
+    return f"{published_name}/_stages/versions/{version}.json"
+
+
+def lineage_key(published_name: str, version: str) -> str:
+    return f"{dataset_prefix(published_name, version)}/lineage/dataset.json"
+
+
+def units_key(published_name: str, version: str) -> str:
+    return f"{dataset_prefix(published_name, version)}/lineage/units.jsonl"
 
 
 def _version_parts(version: str) -> tuple[int, int]:
@@ -144,33 +165,37 @@ def next_dataset_version(existing_versions: Iterable[str]) -> str:
 def dataset_index_record(
     spec: DatasetSpec,
     *,
+    published_name: str,
     version: str,
     manifest_key: str,
     manifest_sha256: str,
+    lineage_sha256: str,
 ) -> dict[str, Any]:
     canonical = canonical_dataset_spec(spec)
-    expected_key = (
-        f"{dataset_prefix(spec.dataset.value, version)}/shards/manifest.json"
-    )
+    expected_key = f"{dataset_prefix(published_name, version)}/shards/manifest.json"
     if manifest_key != expected_key:
-        raise ValueError(
-            f"manifest key {manifest_key!r} is not under {expected_key!r}"
-        )
-    if not _SHA256_RE.fullmatch(manifest_sha256):
-        raise ValueError("manifest_sha256 must be 64 lowercase hex digits")
+        raise ValueError(f"manifest key {manifest_key!r} is not {expected_key!r}")
+    for name, digest in (("manifest_sha256", manifest_sha256), ("lineage_sha256", lineage_sha256)):
+        if not _SHA256_RE.fullmatch(digest):
+            raise ValueError(f"{name} must be 64 lowercase hex digits")
     return {
         "schema_version": DATASET_INDEX_SCHEMA,
         "dataset_id": sha256_bytes(canonical_json_bytes(canonical)),
         "spec": canonical,
+        "published_name": published_name,
         "version": version,
         "manifest_key": manifest_key,
         "manifest_sha256": manifest_sha256,
+        "lineage_key": lineage_key(published_name, version),
+        "lineage_sha256": lineage_sha256,
     }
 
 
 def validate_dataset_index_record(
     record: Mapping[str, Any],
     spec: DatasetSpec,
+    *,
+    published_name: str,
 ) -> None:
     """Reject an index record that does not describe exactly ``spec``."""
     if record.get("schema_version") != DATASET_INDEX_SCHEMA:
@@ -178,13 +203,15 @@ def validate_dataset_index_record(
     canonical = canonical_dataset_spec(spec)
     if record.get("spec") != canonical:
         raise ValueError("dataset index spec differs from the requested spec")
-    if record.get("dataset_id") != sha256_bytes(canonical_json_bytes(canonical)):
-        raise ValueError("dataset index id does not match its spec")
+    if record.get("published_name") != published_name:
+        raise ValueError("dataset index is for another published dataset")
     expected = dataset_index_record(
         spec,
+        published_name=published_name,
         version=str(record.get("version")),
         manifest_key=str(record.get("manifest_key")),
         manifest_sha256=str(record.get("manifest_sha256")),
+        lineage_sha256=str(record.get("lineage_sha256")),
     )
     if dict(record) != expected:
         raise ValueError("dataset index record has unexpected fields")
@@ -195,11 +222,13 @@ def validate_publication(
     *,
     lock: Mapping[str, Any],
     manifest_payload: bytes,
+    expected_contracts: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Check the lock and manifest bytes against an index record.
 
-    Returns the parsed manifest. Shard object existence is checked by the
-    caller, which owns the S3 client.
+    ``expected_contracts`` are the pack contracts of the running code, so a
+    publication packed under older contracts is never reused. Returns the
+    parsed manifest. Shard existence is checked by the caller.
     """
     if lock.get("schema_version") != PUBLICATION_SCHEMA:
         raise ValueError("unsupported publication lock schema")
@@ -211,11 +240,18 @@ def validate_publication(
     manifest = json.loads(manifest_payload)
     if manifest.get("status") != "ready":
         raise ValueError("published manifest is not ready")
-    if manifest.get("dataset") != record["spec"]["dataset"]:
+    if manifest.get("dataset") != record["published_name"]:
         raise ValueError("published manifest dataset differs from the index")
     if manifest.get("version") != record["version"]:
         raise ValueError("published manifest version differs from the index")
+    if manifest.get("contracts") != dict(expected_contracts):
+        raise ValueError("published manifest was packed under other contracts")
+    if int(manifest.get("image_size", -1)) != int(record["spec"]["image_size"]):
+        raise ValueError("published manifest image size differs from the spec")
     entries = manifest.get("shard_entries") or []
     if not entries or len(entries) != manifest.get("shard_count"):
         raise ValueError("published manifest shard entries are incomplete")
+    for entry in entries:
+        if not entry.get("etag"):
+            raise ValueError(f"shard entry {entry.get('name')!r} has no ETag")
     return manifest
