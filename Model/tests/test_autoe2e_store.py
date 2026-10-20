@@ -136,7 +136,7 @@ def _publish(s3, spec, version, *, contracts=None):
         dataset_id=dataset_id, spec=canonical_dataset_spec(spec),
         published={"name": "kitscenes", "version": version},
         raw={"snapshot_manifest_sha256": "a" * 64}, labels=None,
-        units=[UnitLineage("scene-a", "p-a", "k", "1" * 64, "2" * 64, None, None, None, 5, 0)],
+        units=[UnitLineage("scene-a", "p-a", "k", "sha256:" + "1" * 64, "2" * 64, None, None, None, 5, 0)],
         units_uri="s3://x", views={"key": views_manifest_key("kitscenes", version), "sha256": views_sha, "partition_ids": ["p-a"]},
         console=None, pack={"contracts": pack_contracts()}, build={"flyte_execution_id": "exec-1"},
     )
