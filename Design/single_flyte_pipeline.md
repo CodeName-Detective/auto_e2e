@@ -1,4 +1,4 @@
-# Design: Single Flyte Pipeline from Dataset to Registered Model
+# Design: Single Flyte Pipeline from Raw Data to a Traceable Model
 
 ## Document Metadata
 
@@ -8,7 +8,7 @@
 | Owner | riita10069 |
 | Created | 2026-10-20 |
 | Replaces | All 40 `wf_*` entry points in `Platform/pipelines/` on main at `c7fc884d` |
-| Entry points | `wf_autoe2e`, plus `wf_acquire_raw_snapshot` run once per upstream revision |
+| Entry points | `wf_acquire_raw_snapshot` once per upstream revision, `wf_autoe2e` for everything else |
 | Training path | Ray Train on KubeRay, admitted by Kueue |
 
 ## 1. Executive Summary
@@ -18,43 +18,48 @@ KITScenes model needs `wf_sharded_full_run` or a Ray training workflow, then
 `wf_evaluate_kitscenes_benchmark`, then `wf_publish_full_run_overlays` from a
 CodeBuild launcher, then a manual Console materialization Job. A nuPlan model
 also needs `wf_acquire_nuplan_raw_snapshot`, a pack workflow, and a
-hand-written S3 list of shard URIs. Evaluation results end up in different
-MLflow runs and experiments, and up to three model versions are created per
-training run.
+hand-written S3 list of shard URIs. Results end up in different MLflow runs
+and experiments, up to three model versions are created per training run,
+and no record connects a checkpoint to the raw data and labels it was
+trained on.
 
-This design deletes every existing entry point. Upstream data is copied into
-S3 exactly once per dataset revision by `wf_acquire_raw_snapshot`, the only
-workflow that can reach Hugging Face. Everything else is one workflow,
-`wf_autoe2e`, with a small, dataset-agnostic interface that reads raw data
-only from those S3 snapshots. One `wf_autoe2e` execution:
+This design keeps two entry points:
 
-1. resolves the requested dataset to a content-addressed `dataset_id`;
-2. builds and publishes that dataset only if no valid publication exists;
-3. initializes from a parent model if one is given, then trains with Ray
-   Train;
-4. evaluates the best and final checkpoints;
-5. registers the `best` model version, and a `final` version only when it is
-   a different checkpoint;
-6. precomputes Console overlays for the `best` version.
+- `wf_acquire_raw_snapshot` copies upstream data into an immutable S3 raw
+  snapshot once per upstream revision. It is the only code that can reach
+  Hugging Face.
+- `wf_autoe2e` does everything else from S3: it builds or reuses a
+  dataset, trains, evaluates, registers, and precomputes Console overlays.
 
-Multi-stage training of any depth is a chain of executions. Each execution
-takes the previous stage's model version as its parent.
+The data flows through four layers, each immutable and addressed by digest:
+
+```
+raw snapshot ──► labels ──► published dataset ──► checkpoint ──► evaluations
+ (tar + index)   (per unit)   (WebDataset shards)   (model version)   (same run)
+```
+
+Every MLflow model version carries a lineage record that names each layer
+by digest, so any checkpoint can be traced back to the exact raw bytes,
+labels, pack code, and parent model it came from, and every evaluation ever
+run on it is on its run.
 
 ## 2. Decisions
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Entry points | `wf_autoe2e` for everything after acquisition, and `wf_acquire_raw_snapshot` once per upstream revision | Acquisition has a different lifecycle and is the only code that holds the HF token |
-| Upstream access | Only `wf_acquire_raw_snapshot` reads Hugging Face. `wf_autoe2e` tasks never receive the `hf-token` secret | Processing must not depend on, or be rate-limited by, the Hub, and the guarantee is structural |
-| Training backend | Ray only. `train_il` and `train_offline_rl` are removed | One code path for 1, 2, 4, and 8 GPUs. Kueue already admits `ray.io/rayjob` |
-| Datasets per execution | Exactly one | Keeps `dataset_id`, evaluation data, and lineage unambiguous |
-| Multi-stage training | `parent` input that accepts an MLflow model version or a checkpoint | Stages are chained one execution at a time, with no limit on depth |
-| Model versions per execution | `best`, plus `final` only if its checkpoint SHA-256 differs from `best` | No duplicate versions for the same weights |
-| Dataset skip mechanism | Published manifest lookup by `dataset_id` | Flyte cache keys include non-semantic inputs such as concurrency, and DataCatalog write failures have already forced a manual recovery manifest (#121) |
-| Dataset differences | One adapter per dataset behind a fixed interface (4.3) | The workflow, stage store, publication, and training never branch on the dataset |
-| Supported datasets | KITScenes, nuPlan, L2D. NVIDIA PhysicalAI is deleted | NVIDIA has no fan-out planner and no Reactive stage; only the removed `wf_full_pipeline` used it |
-| Source of units | `source_manifest` is always an S3 raw snapshot manifest | Unit lists and raw bytes come from one immutable, SHA-pinned object instead of a Hub listing at run time |
-| Expensive stages | Raw data is acquired once into a snapshot; reasoning labels are recorded per unit and never repeated (4.2, 4.4) | A pack contract bump must only re-pack |
+| Entry points | `wf_acquire_raw_snapshot` and `wf_autoe2e` only | One interface to learn. Acquisition has a different lifecycle and is the only code that holds the HF token |
+| Upstream access | `wf_autoe2e` tasks never receive the `hf-token` secret | Processing never depends on the Hub, and the guarantee is structural |
+| Raw format | Uncompressed tar per unit plus a Parquet member index | nuPlan archives already are uncompressed tar. Range reads of one member need only a key, an offset, and a length |
+| Pack format | WebDataset shards, as today | Training streams samples sequentially |
+| Datasets | KITScenes, nuPlan, L2D behind one adapter interface. NVIDIA PhysicalAI is deleted | The workflow never branches on the dataset. NVIDIA has no fan-out planner and no Reactive stage |
+| Datasets per execution | Exactly one training dataset | Keeps lineage unambiguous. Evaluation datasets are separate inputs |
+| Expensive stages | Raw is acquired once; labels are recorded per unit and never repeated | A pack contract bump must only re-pack |
+| Dataset reuse | By-id index lookup by `dataset_id` | Flyte cache keys include non-semantic inputs, and DataCatalog write failures already forced a manual recovery manifest (#121) |
+| Training backend | Ray only. `train_il` and `train_offline_rl` are removed | One code path for 1, 2, 4, and 8 GPUs |
+| Multi-stage training | `parent` accepts a model version or a checkpoint | Chains of any depth, one execution per stage |
+| Model versions | One per distinct checkpoint: `best`, and `final` only if its SHA-256 differs | No duplicate versions for the same weights |
+| Evaluation-only runs | Append to the run of the evaluated version; no new version | All evaluations of one checkpoint stay on one run |
+| MLflow layout | One experiment `auto-e2e`, one run per training execution | One place to compare everything |
 
 ## 3. Interface
 
@@ -65,7 +70,7 @@ def wf_acquire_raw_snapshot(
     upstream_revision: str,
     units: List[str],               # empty list = every unit at the revision
     datasets_bucket: str,
-) -> ManifestRef: ...               # the snapshot manifest for wf_autoe2e
+) -> ManifestRef: ...               # the snapshot manifest
 
 @workflow
 def wf_autoe2e(
@@ -79,24 +84,24 @@ def wf_autoe2e(
 
 ```python
 @dataclass
-class DatasetSpec:
+class DatasetSpec:                   # every field enters dataset_id
     dataset: AutoE2EDataset          # KITSCENES, NUPLAN, L2D
-    source_manifest: ManifestRef     # S3 raw snapshot manifest: URI + VersionId + SHA-256
+    source_manifest: ManifestRef     # raw snapshot manifest: URI + VersionId + SHA-256
+    unit_limit: int                  # 0 = all units; N = first N in manifest order
     pack_version: str                # code constant
     image_size: int
     pack_params: Dict[str, str]      # adapter-validated, e.g. nuPlan scenario budget
     reasoning: Optional[ReasoningSpec]  # teacher, prompt_version, label_stride
 
 @dataclass
-class ModelRef:
+class ModelRef:                      # exactly one field is set
     model_version: Optional[str]     # e.g. "auto-e2e-driving-policy/66"
-    checkpoint: Optional[FlyteFile]  # used when the parent is not registered
-    # exactly one of the two must be set
+    checkpoint: Optional[FlyteFile]  # a checkpoint that was never registered
 
 @dataclass
 class TrainingSpec:
     gpu_profile: GpuProfile          # RAY_1, RAY_2, RAY_4, RAY_8
-    epochs: int                      # 0 evaluates the parent without training
+    epochs: int                      # 0 = evaluate the parent only
     learning_rate: float
     per_rank_batch_size: int
     seed: int
@@ -105,261 +110,238 @@ class TrainingSpec:
 @dataclass
 class EvaluationSpec:
     suites: List[EvalSuite]          # INTERNAL_VAL, KITSCENES_BENCHMARK, REACTIVE
-    benchmark_dataset: Optional[DatasetSpec]
+    datasets: Dict[str, DatasetSpec] # suite name -> evaluation dataset, if not INTERNAL_VAL
 
 @dataclass
-class RuntimeOptions:
-    ingest_concurrency: int
+class RuntimeOptions:                # speed only, never enters any identity
     label_concurrency: int
     pack_concurrency: int
     copy_workers: int
 ```
 
-`RuntimeOptions` changes how fast an execution runs, never what it
-produces, so it never enters `dataset_id`. Dataset-specific behavior lives
-behind the adapter for `DatasetSpec.dataset`, not in the workflow signature.
-The upstream revision is read from `source_manifest`, so it is pinned by the
-manifest digest instead of being a second, possibly inconsistent input.
+The upstream revision is read from `source_manifest`, so the manifest digest
+pins it. Dataset-specific behavior lives behind the adapter for
+`DatasetSpec.dataset`.
 
-## 4. Stages
+## 4. Data Layers
 
-### 4.1 Resolve dataset
-
-`dataset_id` is the SHA-256 of the canonical JSON of `DatasetSpec`
-(`Platform/pipelines/autoe2e_dataset.py`). Publications keep the
-`<dataset>/vN.M/` layout, because the Console discovers datasets only through
-version directories. After the manifest gate is written, the pipeline adds a
-write-once index object `s3://<datasets_bucket>/<dataset>/by-id/<dataset_id>.json`
-that records the canonical spec, the version, and the manifest key and
-SHA-256. The Console ignores `by-id/` because it is not a version directory.
-
-The resolver task (`resolve_dataset` in `Platform/pipelines/autoe2e_tasks.py`)
-reads that index. A publication is reused only if all of these hold:
-
-- the index's spec and id equal the requested ones;
-- the manifest's SHA-256 matches both the index and `.publication-lock.json`;
-- the manifest is `ready` and names the same dataset and version;
-- every listed shard object exists with the recorded size and ETag.
-
-If the index is valid, the task returns a `DatasetHandle` with
-`published=True` and the shard URIs, and the build stage is skipped through a
-Flyte `conditional`. If no index exists, it returns `published=False` and the
-next minor version after the newest version directory, which the build stage
-publishes under. Any validation failure fails the execution rather than
-falling back to a rebuild. Two executions that build the same new spec
-concurrently cannot both publish: the second one fails at the write-once
-manifest or index.
-
-### 4.2 Raw snapshots
-
-A raw snapshot is an immutable copy of upstream data in the datasets bucket:
+### 4.1 Raw snapshots
 
 ```
 s3://<datasets_bucket>/<dataset>/raw-snapshots/<upstream_revision>/<snapshot_id>/
-  units/<unit_id>/...        # upstream files, byte for byte
-  manifest.json              # written last, write-once
+  units/<unit_id>.tar      # uncompressed tar, upstream files byte for byte
+  index/<unit_id>.parquet  # one row per member
+  manifest.json            # written last, write-once
 ```
 
-The manifest lists, per unit, the S3 prefix, object count, total bytes, and
-a digest over every object's relative key, size, and SHA-256. It also records
-the dataset, the upstream repository and revision, and how the bytes were
-obtained. `wf_autoe2e` validates the manifest digest against
-`DatasetSpec.source_manifest` before reading anything, and the pack tasks
-read units only from the prefixes it lists.
+Each tar member is named `<unit_id>/<upstream relative path>`, so the tars
+also stream with WebDataset tools. JPEG and Parquet sources are already
+compressed, so the tar is not.
 
-`wf_acquire_raw_snapshot` is the only workflow with the `hf-token` secret. It
-copies each requested unit from the Hub, verifies sizes and hashes, writes
-the objects with `IfNoneMatch="*"`, and writes the manifest last. Rerunning
-it for the same revision and units finds the existing objects and rewrites
-nothing. nuPlan already follows this pattern with
-`wf_acquire_nuplan_raw_snapshot` and `nuplan_raw_snapshot_v1`; that
-acquisition becomes the nuPlan branch of `wf_acquire_raw_snapshot`, and its
-manifest schema is kept.
+The index has one row per member: tar key, `offset_data`, size, SHA-256, and
+the adapter's parsed fields (sensor, timestamp, frame index). It is written
+once by streaming the tar with the standard `tarfile` module. Reading one
+member is a single ranged GET, `fs.cat_file(tar_key, offset, offset + size)`;
+no FUSE and no extraction. Planners select members by querying the index
+instead of listing S3.
 
-Existing data becomes snapshots without touching the Hub:
+The manifest records the dataset, upstream repository and revision, how the
+bytes were obtained, and per unit: tar key, tar size, tar SHA-256, member
+count, and index SHA-256. `wf_autoe2e` checks the manifest digest against
+`DatasetSpec.source_manifest` before reading anything.
 
-| Dataset | Snapshot | Source of the bytes |
-|---|---|---|
-| KITScenes train | `kitscenes/raw-snapshots/6fde0034…/` with 533 scenes | server-side copy of the `raw_uri` prefixes of Full Run `a5nk56zsbcg7g6npjfpt` from the Flyte artifacts bucket, listed in the frozen recovery manifest (1.75 TB, 14.47 million objects) |
-| nuPlan | `nuplan/raw-snapshots/nuplan-v1.1-complete/nuplan-v1.1-complete-20260809/` | already exists (341 archives, 20.3 TB) |
-| L2D, KITScenes val and test | none yet | the first `wf_acquire_raw_snapshot` run is the only Hub access |
+`wf_acquire_raw_snapshot` downloads each requested unit, verifies upstream
+hashes, writes the tar and index with `IfNoneMatch="*"`, and writes the
+manifest last. Rerunning it rewrites nothing.
 
-### 4.3 Dataset adapters
-
-Every dataset implements the same adapter interface
-(`Platform/pipelines/autoe2e_adapters.py`):
-
-| Member | Meaning |
-|---|---|
-| `published_name(plan)` | Published dataset id, e.g. `kitscenes`, `kitscenes-val`, `nuplan` |
-| `read_snapshot(manifest_bytes, pack_params)` | Validates the snapshot manifest and returns a `SourcePlan`: upstream revision, unit ids with their S3 prefixes, and the pack partitions as lists of unit ids |
-| `acquire_task` | Flyte task that copies one unit from upstream into a snapshot. Used only by `wf_acquire_raw_snapshot` |
-| `label_task` | Flyte task that labels one unit from its snapshot prefix, or `None` if the dataset has no reasoning labels |
-| `pack_task` | Flyte task that packs one partition from snapshot and label prefixes into a publication-ready directory |
-
-| | KITScenes | nuPlan | L2D |
+| Dataset | Unit | Snapshot | Bytes come from |
 |---|---|---|---|
-| Unit | scene | archive | episode |
-| Snapshot manifest | `autoe2e_raw_snapshot_v1` | `nuplan_raw_snapshot_v1` (existing) | `autoe2e_raw_snapshot_v1` |
-| `acquire_task` | HF download of one scene | `acquire_nuplan_archive` | HF download of one episode |
-| `label_task` | `generate_reasoning_labels` | `None` | `generate_reasoning_labels` |
-| Partition | one scene | one sensor group (43 for train) | `pack_params["partition_size"]` episodes |
-| `pack_task` | `data_processing` | `pack_nuplan_snapshot_reactive_dataset` | `data_processing` |
-| `pack_params` | none | `total_scenario_limit`, `samples_per_shard`, `max_rejection_fraction` | `partition_size`, `osm_graph_snapshot` |
-| Split for validation | frozen holdout `kitscenes_train_dev_v4.json` | hash buckets of the log id | hash buckets |
+| KITScenes train | scene | `kitscenes/raw-snapshots/6fde0034…/` | the 533 `raw_uri` prefixes of Full Run `a5nk56zsbcg7g6npjfpt` in the Flyte artifacts bucket, tarred in-region (1.75 TB, 14.47 million objects become 533 tars). No Hub access |
+| nuPlan | archive | `nuplan/raw-snapshots/nuplan-v1.1-complete/nuplan-v1.1-complete-20260809/` | already exists. Its 341 archives are uncompressed tar despite the `.zip` name; only the index is added |
+| L2D, KITScenes val and test | episode, scene | none yet | the first `wf_acquire_raw_snapshot` run is the only Hub access |
 
-The parsers and packers that currently fetch metadata from the Hub
-(`plan_fanout_partitions` through `LeRobotDatasetMetadata`,
-`Model/data_parsing/kit_scenes/source.py`, and the KITScenes test direct
-pack) read the same files from the snapshot instead.
+### 4.2 Labels
 
-Known gaps that the adapters make explicit instead of hiding:
-
-- nuPlan training packs are published like every other dataset. Today Ray
-  reads the 43 pack directories directly from a hand-written URI list.
-- The L2D Reactive contract needs OSM navigation (14 map channels), but no
-  Flyte task passes `osm_graph_snapshot_path` to the packer today. The L2D
-  adapter rejects a spec without `osm_graph_snapshot` until that is wired.
-
-### 4.4 Build dataset (conditional)
-
-`build_dataset` is one `@dynamic` task for all datasets:
-
-1. read the `SourcePlan` from the snapshot through the adapter;
-2. look up the label record of every unit in the label store;
-3. run `label_task` only for units without a label record, then record what
-   it produced;
-4. run `pack_task` for every partition;
-5. publish with `publish_dataset_partition` and
-   `finalize_dataset_publication` under the allocated version, then
-   `record_dataset_index` writes the by-id index and re-resolves the result
-   through the same validation.
-
-No task in this stage requests the `hf-token` secret. A unit that is not in
-the snapshot fails the build with the missing unit ids; it is never fetched.
-
-#### Label store
-
-Labels are billed Cosmos calls and must never repeat. Their identity is
-independent of the pack:
+Labels are billed Cosmos calls and are never repeated. A label set is per
+unit, and its identity excludes everything about the pack:
 
 | Identity fields | Not included |
 |---|---|
 | dataset, upstream revision, unit id, teacher, `prompt_version`, `label_stride`, `REASONING_LABEL_POLICY_VERSION`, `UID_SCHEMA_VERSION` | parser, shard, and geometry versions |
 
-A write-once record per unit lives at
-`s3://<datasets_bucket>/<dataset>/_stages/labels/<label_id>.json`, and the
-label files themselves are written under
-`s3://<datasets_bucket>/<dataset>/labels/<label_id>/`. The record holds the
-object count, total size, and a digest over every object's relative key,
-size, and ETag. Before a build uses a record, it lists the label files and
-compares the digest. A mismatch fails the execution instead of silently
-re-labeling.
+Label files live under `<dataset>/labels/<label_id>/`, with a write-once
+record at `<dataset>/_stages/labels/<label_id>.json` holding a digest over
+every file's relative key, size, and ETag. A build verifies the digest before
+use and fails on a mismatch instead of re-labeling.
 
 A parser change can change which frames exist, but it does not re-label. The
-pack JOIN already treats a sample without a label as fully masked, and the
-publication records `reasoning_label_count`, so lost coverage is visible
-instead of silently re-billed.
+pack JOIN treats a sample without a label as fully masked, and the
+publication records `reasoning_label_count`, so lost coverage is visible.
 
-The 533 KITScenes label sets from Full Run `a5nk56zsbcg7g6npjfpt` are copied
-into the label store once, after each label `meta.json` is checked against
-the label identity. A read-only dry run on 2026-10-20 validated all 533.
+The 533 KITScenes label sets of Full Run `a5nk56zsbcg7g6npjfpt` are copied
+into the label store once. A read-only dry run on 2026-10-20 checked every
+label `meta.json` against the label identity.
 
-### 4.5 Resolve parent
+### 4.3 Published datasets
 
-If `parent.model_version` is set, the task downloads that version's
-checkpoint and checks the SHA-256 tag on the version. If `parent.checkpoint`
-is set, the task computes its SHA-256. The result is a `ParentHandle` with
-the checkpoint, its SHA-256, and the parent's `stage_index`, which is 0 for
-an unregistered checkpoint.
+`dataset_id` is the SHA-256 of the canonical JSON of `DatasetSpec`.
+Publications keep the `<dataset>/vN.M/` layout that the Console reads. After
+the manifest gate, the build writes two write-once objects:
 
-### 4.6 Train
+- `<dataset>/by-id/<dataset_id>.json`: the canonical spec, version, and
+  manifest key and SHA-256;
+- `<dataset>/vN.M/lineage.json`: the raw snapshot manifest SHA-256, the
+  sorted list of `(unit_id, label_id, label record SHA-256)` used, the pack
+  image digest, git commit, contract versions, and the Flyte execution id.
 
-`train_ray(dataset_handle, parent_handle, training)` is one task factory.
-`gpu_profile` selects the `RayJobConfig`, Kueue queue, priority class, and
-node selector from a single table, so no code outside that table names a
-queue. The task reads the active Capacity Block end time itself instead of
-receiving it from a CodeBuild buildspec.
+The Console ignores both because they are not version directories or
+shards. A publication is reused only if the index's spec equals the request,
+the manifest SHA-256 matches the index and `.publication-lock.json`, the
+manifest is `ready`, and every shard exists with the recorded size and
+ETag. Any mismatch fails the execution.
 
-With `epochs == 0` the task does not start Ray. It returns the parent
-checkpoint as both `best` and `final`, which makes an evaluation-only run of
-any registered model.
+### 4.4 Dataset adapters
 
-The task creates the MLflow run. Its outputs are the run id and the `best`
-and `final` checkpoints.
-
-### 4.7 Evaluate
-
-Each requested suite runs for each distinct checkpoint and logs to the
-training run with the prefix `eval/<role>/<suite>/`:
-
-| Suite | Data |
+| Member | Meaning |
 |---|---|
-| `INTERNAL_VAL` | validation split from the `DatasetHandle` |
-| `KITSCENES_BENCHMARK` | `benchmark_dataset`, resolved through 4.1 and 4.4. The model is re-executed |
-| `REACTIVE` | the existing Reactive KITScenes evaluation |
+| `published_name(plan)` | e.g. `kitscenes`, `kitscenes-val`, `nuplan` |
+| `read_snapshot(manifest, unit_limit, pack_params)` | returns a `SourcePlan`: upstream revision, units, and pack partitions |
+| `acquire_task` | downloads one unit into a snapshot. Used only by `wf_acquire_raw_snapshot` |
+| `index_member(name)` | parses sensor, timestamp, and frame index from a member name |
+| `label_task` | labels one unit from the snapshot, or `None` |
+| `pack_task` | packs one partition from snapshot members and labels into WebDataset shards |
 
-The evaluation tasks no longer take `expected_model_version`, because
-registration happens after evaluation.
+| | KITScenes | nuPlan | L2D |
+|---|---|---|---|
+| `acquire_task` | HF download of one scene | `acquire_nuplan_archive` | HF download of one episode |
+| `label_task` | `generate_reasoning_labels` | `None` | `generate_reasoning_labels` |
+| Partition | one scene | one sensor group (43 for train) | `pack_params["partition_size"]` episodes |
+| `pack_task` | `data_processing` | `pack_nuplan_snapshot_reactive_dataset` | `data_processing` |
+| `pack_params` | none | `total_scenario_limit`, `samples_per_shard`, `max_rejection_fraction` | `partition_size`, `osm_graph_snapshot` |
+| Validation split | frozen holdout `kitscenes_train_dev_v4.json` | hash buckets of the log id | hash buckets |
 
-### 4.8 Register
+Pack tasks read only the members their partition needs. A nuPlan pack no
+longer downloads and extracts whole 157 to 250 GB archives, which is what
+forces 1200Gi of ephemeral storage today, so pack partitions can be small
+and many.
 
-The pipeline creates a `best` version of `auto-e2e-driving-policy`. It
-creates a `final` version only if the final checkpoint's SHA-256 differs
-from the best one. Both versions use the training run as `run_id`. Tags on
-each version:
+The code that fetches metadata from the Hub today
+(`plan_fanout_partitions` through `LeRobotDatasetMetadata`,
+`Model/data_parsing/kit_scenes/source.py`, and the KITScenes test direct
+pack) reads the same files from the snapshot instead.
 
-- `checkpoint_role` (`best` or `final`), checkpoint URI and SHA-256;
-- `flyte_execution_id`, `dataset_id`, `dataset_manifest_sha256`;
-- `parent_model_version` (empty for an unregistered parent),
-  `parent_checkpoint_sha256`, and `stage_index` (parent's `stage_index`
-  plus 1);
-- training image digest and git commit;
-- headline metrics copied from the run.
+Known gaps:
 
-The dataset is recorded with `mlflow.log_input` on the run. Aliases are not
-used. Following `parent_model_version` from any version reconstructs its
-whole training chain.
+- The L2D Reactive contract needs OSM navigation (14 map channels), but no
+  Flyte task passes `osm_graph_snapshot_path` to the packer. The L2D adapter
+  rejects a spec without `osm_graph_snapshot` until that is wired.
 
-### 4.9 Precompute overlays
+## 5. `wf_autoe2e` Stages
 
-Overlay precompute runs for the `best` version on the evaluation dataset. It
-is skipped if `OVLSET` is already `ready` for the same checkpoint SHA-256
-and dataset manifest SHA-256. The reasoning materialization Job becomes a
-task in this stage.
+| # | Stage | Skipped when |
+|---|---|---|
+| 1 | Resolve the training dataset and each evaluation dataset by `dataset_id` | — |
+| 2 | Build: label units without a label record, pack every partition, publish, write by-id and lineage | the dataset is already published |
+| 3 | Resolve the parent: download the checkpoint, verify its SHA-256, read its `stage_index` | no parent |
+| 4 | Train with Ray Train | `epochs == 0` |
+| 5 | Evaluate every suite on every distinct checkpoint | — |
+| 6 | Register one model version per new distinct checkpoint | `epochs == 0` |
+| 7 | Precompute Console overlays for `best` | `OVLSET` is ready for the same checkpoint and dataset |
 
-## 5. Launch Plans
+`train_ray` is one task factory. `gpu_profile` picks the `RayJobConfig`,
+Kueue queue, priority class, and node selector from a single table. The task
+reads the active Capacity Block end time itself.
 
-Only `autoe2e_smoke` is defined: a 10-scene KITScenes split, `RAY_1`, 1
-epoch, `INTERNAL_VAL`. Every other run passes its specs explicitly, so the
-inputs of a run are visible on its execution page.
+Registration first searches `auto-e2e-driving-policy` for a version whose
+`checkpoint_sha256` tag equals the checkpoint, so one set of weights never
+gets two versions, even across executions.
 
-## 6. Deletion
+With `epochs == 0`, nothing is trained. If the parent is a model version,
+stage 5 appends to that version's run. If the parent is an unregistered
+checkpoint, the execution creates a run and registers the checkpoint once
+with `checkpoint_role=imported`; its `lineage.json` marks `dataset`, `pack`,
+`labels`, and `raw` as unknown instead of guessing them.
 
-Everything on the model production path collapses into `wf_autoe2e`, and
-acquisition into `wf_acquire_raw_snapshot`. Nothing else stays registered.
+## 6. Traceability in MLflow
+
+All runs live in one experiment, `auto-e2e`. A training execution creates
+one run; its versions and every later evaluation of them point at it.
+
+| On the run | Content |
+|---|---|
+| params | flattened `DatasetSpec`, `TrainingSpec`, `ModelRef`; `gpu_profile`; Kueue queue |
+| tags | `flyte_execution_id`, training image digest, git commit, capacity reservation id, `dataset_id`, `stage_index` |
+| inputs (`mlflow.log_input`) | training dataset with context `training`; each evaluation dataset with context `eval:<suite>`. Source is the by-id index URI, digest is `dataset_id` |
+| metrics | training curves per step; `eval/<role>/<suite>/<metric>` per checkpoint role |
+| artifacts | `lineage.json` (section 6.1), validation unit list, per-evaluation result files under `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` |
+
+Each model version carries tags: `checkpoint_role`, checkpoint URI and
+SHA-256, `dataset_id`, `parent_model_version`, `parent_checkpoint_sha256`,
+`stage_index`, overlay manifest key and SHA-256, and the headline metrics of
+each suite. An evaluation added later writes the same metric names with the
+evaluation dataset's version in the suite name, for example
+`eval/best/kitscenes_benchmark@kitscenes-val-v3.5/ade_3s`, so later results
+never overwrite earlier ones.
+
+### 6.1 Lineage record
+
+`lineage.json` on the run resolves the whole chain with digests only:
+
+```json
+{
+  "checkpoint": {"role": "best", "sha256": "…", "uri": "s3://…"},
+  "parent": {"model_version": "auto-e2e-driving-policy/66", "checkpoint_sha256": "…", "stage_index": 1},
+  "dataset": {"dataset_id": "…", "published": "kitscenes/v3.6", "manifest_sha256": "…"},
+  "pack": {"pack_version": "…", "contracts": {"shard": "v13", "geometry": "v7", "parser": "v3"}, "image_digest": "sha256:…", "git_commit": "…"},
+  "labels": {"label_set_sha256": "…", "units": 533, "teacher": "openai_compatible", "prompt_version": "…"},
+  "raw": {"snapshot_manifest": "s3://…/manifest.json", "sha256": "…", "upstream": "KIT-MRT/KITScenes-Multimodal@6fde0034…"},
+  "training": {"flyte_execution_id": "…", "image_digest": "sha256:…", "git_commit": "…"}
+}
+```
+
+Walking `parent.model_version` repeats this for every earlier stage, so the
+full chain from the first raw snapshot to the current checkpoint is
+recoverable from MLflow alone.
+
+### 6.2 Questions this answers
+
+| Question | Where |
+|---|---|
+| Which data trained this checkpoint? | version tag `dataset_id` → run input `training` → `lineage.json` `dataset` |
+| Which raw bytes and upstream revision? | `lineage.json` `raw` |
+| Which labels, from which teacher and prompt? | `lineage.json` `labels`, and the publication's `lineage.json` lists every label record |
+| Which code packed and trained it? | `lineage.json` `pack` and `training` image digests and commits |
+| What was it initialized from? | `parent`, recursively |
+| Every evaluation ever run on it, and on which data? | run metrics `eval/<role>/…`, inputs `eval:<suite>`, and `evaluations/<checkpoint_sha256>/` |
+
+## 7. Launch Plans
+
+Only `autoe2e_smoke` is defined: KITScenes with `unit_limit=10`, `RAY_1`, 1
+epoch, `INTERNAL_VAL`. Every other run passes its specs explicitly, so its
+inputs are visible on the execution page.
+
+## 8. Deletion
 
 | Removed | Where its logic goes |
 |---|---|
 | `wf_sharded_full_run`, `wf_train_il`, `wf_train_offline_rl`, `wf_full_pipeline`, `wf_ingest_train_eval` | `wf_autoe2e`. The IL and offline RL training loops are deleted |
 | `wf_train_reactive_*` (9 workflows), `wf_reactive_multistage_ray_2_canary` | `train_ray` with `gpu_profile` and `parent` |
-| `wf_data_ingest`, `wf_data_processing`, `wf_generate_reasoning_labels`, `wf_create_dataset`, `wf_create_dataset_sharded`, `wf_create_kitscenes_*evaluation_sharded`, nuPlan acquire and pack workflows | snapshots (4.2), adapters (4.3), and stage 4.4 |
-| `wf_evaluate_*` | stage 4.7 |
-| overlay and dataset publication workflows | stages 4.4 and 4.9 |
-| `wf_audit_kitscenes_target_reconstruction`, `wf_audit_kitscenes_benchmark_inventory` | validation inside 4.1 and 4.4 |
-| `wf_prepare_kitscenes_paper_approximation`, `wf_export_trajectory_report` | deleted. They are not needed to produce or evaluate a model |
-| NVIDIA PhysicalAI branches in `data_ingest`, `data_processing`, `generate_reasoning_labels`, and `physical_ai_av` in the data-prep image | deleted |
+| `wf_data_ingest`, `wf_acquire_nuplan_raw_snapshot` | `wf_acquire_raw_snapshot` |
+| `wf_data_processing`, `wf_generate_reasoning_labels`, `wf_create_dataset*`, `wf_create_kitscenes_*evaluation_sharded`, nuPlan pack workflows | adapters and stage 2 |
+| `wf_evaluate_*` | stage 5 |
+| overlay and dataset publication workflows | stages 2 and 7 |
+| `wf_audit_kitscenes_*` | validation inside stages 1 and 2 |
+| `wf_prepare_kitscenes_paper_approximation`, `wf_export_trajectory_report` | deleted |
+| NVIDIA PhysicalAI branches and `physical_ai_av` in the data-prep image | deleted |
 
-The CodeBuild launcher buildspecs for the removed workflows are deleted.
-Tasks that no stage calls after the migration are deleted with them. After
-`wf_autoe2e` is registered, the remaining old entry points are archived in
-Flyte.
+The CodeBuild launcher buildspecs for removed workflows and the tasks no
+stage calls are deleted with them. After `wf_autoe2e` is registered, the old
+entry points are archived in Flyte.
 
-## 7. Out of Scope
+## 9. Out of Scope
 
 - Making Kueue admission depend on an existing Capacity Block
-  (ProvisioningRequest or an AdmissionCheck). This is needed for transparent
-  capacity, but it is infrastructure work tracked separately.
+  (ProvisioningRequest or an AdmissionCheck).
 - Automatic Capacity Block purchase. `Platform/README.md` keeps purchase as
   an operator action.
 - Multi-node training and EFA.
