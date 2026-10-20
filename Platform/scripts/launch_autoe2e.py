@@ -70,6 +70,15 @@ def build_inputs(run: dict) -> tuple[str, dict]:
     return "Platform.pipelines.autoe2e.wf_autoe2e", inputs
 
 
+def _type_hints(name: str) -> dict:
+    import importlib
+    import typing
+
+    module_name, _, function = name.rpartition(".")
+    workflow = getattr(importlib.import_module(module_name), function)
+    return typing.get_type_hints(workflow._workflow_function)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", required=True, help="flyteadmin gRPC endpoint, e.g. localhost:8089")
@@ -94,7 +103,12 @@ def main(argv: list[str] | None = None) -> int:
         default_project=args.project, default_domain=args.domain,
     )
     workflow = remote.fetch_workflow(name=name, version=args.version)
-    execution = remote.execute(workflow, inputs=inputs, execution_name=args.name, wait=False)
+    # The fetched workflow only knows guessed types; hand it the real ones.
+    type_hints = _type_hints(name)
+    execution = remote.execute(
+        workflow, inputs=inputs, execution_name=args.name, wait=False,
+        type_hints={key: type_hints[key] for key in inputs},
+    )
     print(json.dumps({"execution": execution.id.name}))
     return 0
 
