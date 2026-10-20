@@ -141,8 +141,12 @@ def test_every_dynamic_carries_the_registration_environment():
         "assert dynamics >= 6, dynamics\n"
         "assert not bad, bad\n"
     )
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
     env = {
         **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(root / "Model"), str(root), os.environ.get("PYTHONPATH", "")]),
         "AUTO_E2E_TRAINING_IMAGE": "img/training@sha256:t",
         "AUTO_E2E_DATA_PREP_IMAGE": "img/data-prep@sha256:d",
         "AUTO_E2E_GIT_COMMIT": "abc",
