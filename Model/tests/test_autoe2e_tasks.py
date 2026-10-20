@@ -14,8 +14,16 @@ from Platform.pipelines.autoe2e_dataset import (
     ReasoningSpec,
     compute_dataset_id,
 )
+from Platform.pipelines.autoe2e_stages import (
+    LabelIdentity,
+    SceneStage,
+    label_identity,
+    raw_identity,
+)
 from Platform.pipelines.autoe2e_tasks import (
     DatasetHandle,
+    lookup_scene_stage,
+    record_scene_stage,
     resolve_published_dataset,
     write_dataset_index,
 )
@@ -40,13 +48,25 @@ class _Paginator:
     def __init__(self, s3):
         self.s3 = s3
 
-    def paginate(self, *, Bucket, Prefix, Delimiter):
+    def paginate(self, *, Bucket, Prefix, Delimiter=None):
+        keys = sorted(
+            key for bucket, key in self.s3.objects
+            if bucket == Bucket and key.startswith(Prefix)
+        )
+        if Delimiter is None:
+            yield {"Contents": [
+                {
+                    "Key": key,
+                    "Size": len(self.s3.objects[(Bucket, key)]),
+                    "ETag": f'"{sha256_bytes(self.s3.objects[(Bucket, key)])[:32]}"',
+                }
+                for key in keys
+            ]}
+            return
         prefixes = sorted({
             Prefix + key[len(Prefix):].split(Delimiter, 1)[0] + Delimiter
-            for bucket, key in self.s3.objects
-            if bucket == Bucket
-            and key.startswith(Prefix)
-            and Delimiter in key[len(Prefix):]
+            for key in keys
+            if Delimiter in key[len(Prefix):]
         })
         yield {"CommonPrefixes": [{"Prefix": prefix} for prefix in prefixes]}
 
@@ -253,3 +273,86 @@ def test_task_interface_types_round_trip_through_flyte(value, python_type):
     literal_type = TypeEngine.to_literal_type(python_type)
     literal = TypeEngine.to_literal(ctx, value, python_type, literal_type)
     assert TypeEngine.to_python_value(ctx, literal, python_type) == value
+
+
+def _raw_artifact(s3: _S3, prefix: str = "sv/run/abc") -> str:
+    s3.put(f"{prefix}/data/train/scene-a/x.mcap", b"frames")
+    s3.put(f"{prefix}/data/sequence_archives.csv", b"csv")
+    return f"s3://{BUCKET}/{prefix}"
+
+
+def test_unrecorded_scene_stage_is_absent():
+    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
+    assert lookup_scene_stage(
+        _S3(),
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.RAW,
+        identity=identity,
+    ) is None
+
+
+def test_recorded_scene_stage_is_reused():
+    s3 = _S3()
+    uri = _raw_artifact(s3)
+    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
+    key = record_scene_stage(
+        s3,
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.RAW,
+        identity=identity,
+        artifact_uri=uri + "/",
+    )
+    assert key.startswith("kitscenes/_stages/raw/")
+    assert lookup_scene_stage(
+        s3,
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.RAW,
+        identity=identity,
+    ) == uri
+
+
+def test_changed_scene_artifact_fails_instead_of_rebuilding():
+    s3 = _S3()
+    uri = _raw_artifact(s3)
+    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
+    record_scene_stage(
+        s3,
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.RAW,
+        identity=identity,
+        artifact_uri=uri,
+    )
+    del s3.objects[(BUCKET, "sv/run/abc/data/sequence_archives.csv")]
+    with pytest.raises(ValueError, match="changed"):
+        lookup_scene_stage(
+            s3,
+            bucket=BUCKET,
+            dataset=AutoE2EDataset.KITSCENES,
+            stage=SceneStage.RAW,
+            identity=identity,
+        )
+
+
+def test_label_record_is_separate_from_raw_record():
+    s3 = _S3()
+    uri = _raw_artifact(s3)
+    labels = LabelIdentity("openai_compatible", "p", 10, "v2", "v1")
+    record_scene_stage(
+        s3,
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.RAW,
+        identity=raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a"),
+        artifact_uri=uri,
+    )
+    assert lookup_scene_stage(
+        s3,
+        bucket=BUCKET,
+        dataset=AutoE2EDataset.KITSCENES,
+        stage=SceneStage.LABELS,
+        identity=label_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a", labels),
+    ) is None
