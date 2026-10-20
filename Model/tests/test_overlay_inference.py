@@ -512,3 +512,37 @@ def test_load_policy_filters_config_and_returns_checkpoint_identity(
     assert torch.equal(loaded.weight, source.weight)
     assert config["removed_argument"] == "ignored"
     assert artifact_id == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+
+def test_load_policy_rebuilds_reactive_checkpoints_from_their_stage(
+    tmp_path, monkeypatch
+):
+    from model_components import auto_e2e as auto_e2e_module
+    from Platform.pipelines import inference
+
+    seen = {}
+
+    class TinyPolicy(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen.update(kwargs)
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+    checkpoint = tmp_path / "reactive.pt"
+    torch.save(
+        {
+            "model_state_dict": TinyPolicy().state_dict(),
+            "config": {"training_stage": "kitscenes_finetune", "backbone": "res_net_50",
+                       "embed_dim": 256, "num_views": 6, "is_pretrained": True},
+            "metrics": {"evidence": [object.__name__]},
+        },
+        checkpoint,
+    )
+    seen.clear()
+    monkeypatch.setattr(auto_e2e_module, "AutoE2E", TinyPolicy)
+    monkeypatch.setattr(inference, "reactive_policy_kwargs",
+                        lambda config: {"is_pretrained": False, "stage": config["training_stage"]})
+
+    load_policy(checkpoint, "cpu")
+
+    assert seen == {"is_pretrained": False, "stage": "kitscenes_finetune"}
