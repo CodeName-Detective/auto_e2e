@@ -65,9 +65,16 @@ def _check_pack_version(spec: DatasetSpec) -> None:
 class UnitRef:
     unit_id: str
     tar_key: str
-    tar_sha256: str
+    tar_digest: str  # "sha256:<hex>" or, for S3-copied archives, "crc64nvme:<base64>"
     index_key: str
-    index_sha256: str
+    index_sha256: str  # "" when the archive has no member index
+
+    @property
+    def tar_sha256(self) -> str:
+        algorithm, _, value = self.tar_digest.partition(":")
+        if algorithm != "sha256":
+            raise ValueError(f"{self.unit_id} is pinned by {algorithm}, not SHA-256")
+        return value
 
 
 @dataclass
@@ -117,7 +124,7 @@ def _unit_plan(spec: DatasetSpec, payload: bytes, *, upstream: str) -> tuple[dic
         UnitRef(
             unit_id=unit["unit_id"],
             tar_key=unit["tar_key"],
-            tar_sha256=unit["tar_sha256"],
+            tar_digest=f"sha256:{unit['tar_sha256']}",
             index_key=unit["index_key"],
             index_sha256=unit["index_sha256"],
         )
@@ -204,7 +211,7 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         UnitRef(
             unit_id=str(archive["archive_id"]),
             tar_key=str(archive["object_uri"]).split("/", 3)[3],
-            tar_sha256=str(archive["sha256"]),
+            tar_digest=nuplan_archive_digest(archive),
             index_key="",
             index_sha256="",
         )
@@ -222,6 +229,15 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         labels=False,
         pack_params=dict(spec.pack_params),
     )
+
+
+def nuplan_archive_digest(archive: Mapping) -> str:
+    """The digest the nuPlan snapshot pins an archive by."""
+    if archive.get("sha256"):
+        return f"sha256:{archive['sha256']}"
+    if archive.get("checksum_crc64nvme"):
+        return f"crc64nvme:{archive['checksum_crc64nvme']}"
+    raise ValueError(f"{archive.get('archive_id')}: the snapshot pins no digest")
 
 
 def normalized_nuplan_pack_params(params: Mapping[str, str]) -> dict[str, str]:
