@@ -15,10 +15,10 @@ from Platform.pipelines.autoe2e_lineage import (
     dataset_lineage,
     evaluation_record,
     parse_record,
-    read_units_parquet,
+    read_units_jsonl,
     record_bytes,
     record_sha256,
-    units_parquet,
+    units_jsonl,
 )
 
 H = lambda c: c * 64  # noqa: E731
@@ -41,10 +41,19 @@ def _unit(unit_id="a", **overrides):
     return UnitLineage(**values)
 
 
+SPEC = {"dataset": "kitscenes", "schema_version": "autoe2e_dataset_spec_v1"}
+
+
+def _spec_id(spec=SPEC):
+    from Platform.pipelines.dataset_publication import canonical_json_bytes, sha256_bytes
+
+    return sha256_bytes(canonical_json_bytes(spec))
+
+
 def _dataset(units=None, labels={"teacher": "openai_compatible"}):
     return dataset_lineage(
-        dataset_id=H("d"),
-        spec={"dataset": "kitscenes"},
+        dataset_id=_spec_id(),
+        spec=SPEC,
         published={"name": "kitscenes", "version": "v3.6", "manifest_key": "k", "manifest_sha256": H("e")},
         raw={"upstream": "KIT-MRT/KITScenes-Multimodal", "revision": "r", "snapshot_manifest_sha256": H("f")},
         labels=labels,
@@ -55,11 +64,30 @@ def _dataset(units=None, labels={"teacher": "openai_compatible"}):
     )
 
 
-def test_units_parquet_round_trips_sorted_and_deterministic():
+def test_dataset_id_must_be_the_spec_digest():
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="digest of the given spec"):
+        dataset_lineage(
+            dataset_id=H("d"), spec=SPEC,
+            published={"name": "kitscenes", "version": "v3.6", "manifest_key": "k", "manifest_sha256": H("e")},
+            raw={"snapshot_manifest_sha256": H("f")}, labels=None,
+            units=[_unit("a", label_id=None, label_record_sha256=None, label_origin=None)],
+            units_uri="s3://x", pack={}, build={},
+        )
+
+
+def test_units_jsonl_is_canonical():
+    payload = units_jsonl([_unit("a")])
+    with pytest.raises(ValueError, match="canonical"):
+        read_units_jsonl(payload.replace(b'{"', b'{ "', 1))
+
+
+def test_units_jsonl_round_trips_sorted_and_deterministic():
     units = [_unit("b"), _unit("a")]
-    payload = units_parquet(units)
-    assert payload == units_parquet(list(reversed(units)))
-    assert [u.unit_id for u in read_units_parquet(payload)] == ["a", "b"]
+    payload = units_jsonl(units)
+    assert payload == units_jsonl(list(reversed(units)))
+    assert [u.unit_id for u in read_units_jsonl(payload)] == ["a", "b"]
 
 
 @pytest.mark.parametrize(
@@ -73,12 +101,12 @@ def test_units_parquet_round_trips_sorted_and_deterministic():
 )
 def test_invalid_unit_rows_are_rejected(overrides):
     with pytest.raises(ValueError):
-        units_parquet([_unit(**overrides)])
+        units_jsonl([_unit(**overrides)])
 
 
 def test_duplicate_units_are_rejected():
     with pytest.raises(ValueError, match="unique"):
-        units_parquet([_unit("a"), _unit("a")])
+        units_jsonl([_unit("a"), _unit("a")])
 
 
 def test_dataset_lineage_summarizes_labels_and_pins_units():
@@ -140,6 +168,14 @@ def test_imported_checkpoint_records_unknowns_not_guesses():
     assert record["dataset"] == record["split"] == record["training"] == {"status": "unknown"}
 
 
+def test_imported_checkpoint_cannot_claim_a_parent():
+    with pytest.raises(ValueError, match="no known parent"):
+        _ckpt(
+            checkpoint={"sha256": H("c"), "uri": "s3://x.pt", "role": "imported"},
+            dataset=None, split=None, training=None, selection=None,
+        )
+
+
 def test_trained_checkpoint_cannot_omit_its_dataset():
     with pytest.raises(ValueError, match="needs dataset"):
         _ckpt(dataset=None)
@@ -169,7 +205,7 @@ def test_evaluation_record_always_claims_model_reexecution():
     assert _eval()["schema_version"] == EVALUATION_SCHEMA
 
 
-@pytest.mark.parametrize("metrics", [{}, {"ade": float("nan")}, {"ade": "1"}])
+@pytest.mark.parametrize("metrics", [{}, {"ade": float("nan")}, {"ade": float("inf")}, {"ade": True}, {"ade": "1"}])
 def test_evaluation_rejects_missing_or_non_numeric_metrics(metrics):
     with pytest.raises(ValueError):
         _eval(metrics=metrics)
