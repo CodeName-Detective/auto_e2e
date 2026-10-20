@@ -23,6 +23,41 @@ L2D_UPSTREAM = "yaak-ai/L2D"
 NUPLAN_SNAPSHOT_SCHEMA = "nuplan_raw_snapshot_v1"
 _KITSCENES_SPLIT_NAMES = {"train": "kitscenes", "val": "kitscenes-val", "test": "kitscenes-test"}
 _NUPLAN_PACK_PARAMS = {"total_scenario_limit", "samples_per_shard", "max_rejection_fraction"}
+_NUPLAN_PACK_DEFAULTS = {
+    "total_scenario_limit": "131072",
+    "samples_per_shard": "100",
+    "max_rejection_fraction": "0.25",
+}
+# Must equal the cache_version of pack_nuplan_snapshot_reactive_dataset; a test
+# pins the two together so a nuPlan pack change always changes dataset_id.
+NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v13-manifest-v10"
+
+
+def pack_contracts() -> dict[str, str]:
+    """Pack contracts of the running code, as written into pack manifests."""
+    from data_processing.contract_versions import contract_versions
+
+    return dict(contract_versions())
+
+
+def current_pack_version(dataset: AutoE2EDataset) -> str:
+    """The only pack_version a DatasetSpec may carry with this code.
+
+    Derived from the contract constants, so bumping any contract changes
+    dataset_id and a stale publication is never reused.
+    """
+    contracts = ".".join(f"{key}={value}" for key, value in sorted(pack_contracts().items()))
+    if dataset is AutoE2EDataset.NUPLAN:
+        return f"{contracts}+{NUPLAN_PACK_TASK_VERSION}"
+    return contracts
+
+
+def _check_pack_version(spec: DatasetSpec) -> None:
+    expected = current_pack_version(spec.dataset)
+    if spec.pack_version != expected:
+        raise ValueError(
+            f"pack_version {spec.pack_version!r} is not this code's {expected!r}"
+        )
 
 
 @dataclass
@@ -91,6 +126,7 @@ def _unit_plan(spec: DatasetSpec, payload: bytes, *, upstream: str) -> tuple[dic
 
 
 def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
+    _check_pack_version(spec)
     _reject_unknown(spec.pack_params, set())
     manifest, units = _unit_plan(spec, payload, upstream=KITSCENES_UPSTREAM)
     split = str(manifest["provenance"].get("split", ""))
@@ -112,6 +148,7 @@ def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
 
 
 def read_l2d(spec: DatasetSpec, payload: bytes) -> SourcePlan:
+    _check_pack_version(spec)
     _reject_unknown(spec.pack_params, {"partition_size", "osm_graph_snapshot"})
     if "osm_graph_snapshot" not in spec.pack_params:
         raise ValueError(
@@ -134,7 +171,13 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
 
     from Platform.pipelines.dataset_publication import sha256_bytes
 
+    _check_pack_version(spec)
     _reject_unknown(spec.pack_params, _NUPLAN_PACK_PARAMS)
+    if spec.pack_params != normalized_nuplan_pack_params(spec.pack_params):
+        raise ValueError(
+            "nuPlan pack_params must list every parameter explicitly: "
+            f"{normalized_nuplan_pack_params(spec.pack_params)}"
+        )
     if sha256_bytes(payload) != spec.source_manifest.sha256:
         raise ValueError("snapshot manifest bytes differ from the pinned SHA-256")
     manifest = json.loads(payload)
@@ -146,7 +189,20 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         raise ValueError("nuPlan partitions are sensor groups; unit_limit is not supported")
     _int_param(spec.pack_params, "total_scenario_limit", 131_072, minimum=1)
     _int_param(spec.pack_params, "samples_per_shard", 100, minimum=1)
-    float(spec.pack_params.get("max_rejection_fraction", "0.25"))
+    fraction = float(spec.pack_params["max_rejection_fraction"])
+    if not 0.0 <= fraction < 1.0:
+        raise ValueError("max_rejection_fraction must be in [0, 1)")
+    archives = manifest.get("archives") or []
+    units = [
+        UnitRef(
+            unit_id=str(archive["archive_id"]),
+            tar_key=str(archive["object_uri"]).split("/", 3)[3],
+            tar_sha256=str(archive["sha256"]),
+            index_key="",
+            index_sha256="",
+        )
+        for archive in sorted(archives, key=lambda item: str(item["archive_id"]))
+    ]
     return SourcePlan(
         dataset=spec.dataset,
         upstream=str(manifest["dataset"]),
@@ -154,11 +210,16 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         split="train",
         published_name="nuplan",
         snapshot_manifest_sha256=spec.source_manifest.sha256,
-        units=[],
+        units=units,
         partitions=[],
         labels=False,
         pack_params=dict(spec.pack_params),
     )
+
+
+def normalized_nuplan_pack_params(params: Mapping[str, str]) -> dict[str, str]:
+    """nuPlan pack_params with every default filled, so equal meaning is equal id."""
+    return {**_NUPLAN_PACK_DEFAULTS, **dict(params)}
 
 
 _READERS = {
