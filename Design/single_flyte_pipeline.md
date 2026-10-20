@@ -58,8 +58,9 @@ run on it is on its run.
 | Training backend | Ray only. `train_il` and `train_offline_rl` are removed | One code path for 1, 2, 4, and 8 GPUs |
 | Multi-stage training | `parent` accepts a model version or a checkpoint | Chains of any depth, one execution per stage |
 | Model versions | One per distinct checkpoint: `best`, and `final` only if its SHA-256 differs | No duplicate versions for the same weights |
-| Evaluation-only runs | Append to the run of the evaluated version; no new version | All evaluations of one checkpoint stay on one run |
-| MLflow layout | One experiment `auto-e2e`, one run per training execution | One place to compare everything |
+| MLflow center | One MLflow LoggedModel per distinct checkpoint; the registered version links to it with `model_id` | The model page, not a run, shows lineage, parameters, and every evaluation |
+| Evaluation-only runs | A separate run that takes the model as input; metrics attach to the LoggedModel | Evaluations added later land on the same model without editing older runs |
+| MLflow layout | One experiment `auto-e2e` | One place to compare everything |
 
 ## 3. Interface
 
@@ -256,32 +257,41 @@ Registration first searches `auto-e2e-driving-policy` for a version whose
 `checkpoint_sha256` tag equals the checkpoint, so one set of weights never
 gets two versions, even across executions.
 
-With `epochs == 0`, nothing is trained. If the parent is a model version,
-stage 5 appends to that version's run. If the parent is an unregistered
-checkpoint, the execution creates a run and registers the checkpoint once
-with `checkpoint_role=imported`; its checkpoint lineage marks `dataset`,
-`split`, and `training` as unknown instead of guessing them.
+With `epochs == 0`, nothing is trained. The execution creates an
+evaluation run that takes the parent's LoggedModel as input and attaches its
+metrics to that LoggedModel. If the parent is an unregistered checkpoint, the
+execution first creates a LoggedModel and a version for it once, with
+`checkpoint_role=imported`; its checkpoint lineage marks `dataset`, `split`,
+and `training` as unknown instead of guessing them.
 
 ## 6. Traceability in MLflow
 
-All runs live in one experiment, `auto-e2e`. A training execution creates
-one run; its versions and every later evaluation of them point at it.
+MLflow 3 tracks models as first-class LoggedModels, separate from runs. This
+design puts everything about a checkpoint on its LoggedModel, so the model
+registry page answers every question without opening a run.
 
-| On the run | Content |
-|---|---|
-| params | flattened `DatasetSpec`, `TrainingSpec`, `ModelRef`; `gpu_profile`; Kueue queue |
-| tags | `flyte_execution_id`, training image digest, git commit, capacity reservation id, `dataset_id`, `stage_index` |
-| inputs (`mlflow.log_input`) | training dataset with context `training`; each evaluation dataset with context `eval:<suite>`. Source is the by-id index URI, digest is `dataset_id` |
-| metrics | training curves per step; `eval/<role>/<suite>/<metric>` per checkpoint role |
-| artifacts | `lineage/<checkpoint_sha256>.json` and `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` (6.1), validation unit list |
+```
+parent LoggedModel ──input──► training run ──output──► LoggedModel (best) ◄── version N
+                                   │                    LoggedModel (final) ◄── version N+1
+training dataset ──input───────────┘                         ▲
+evaluation dataset ──input──► evaluation run ──metrics───────┘
+```
 
-Each model version carries tags: `checkpoint_role`, checkpoint URI and
-SHA-256, `dataset_id`, `parent_model_version`, `parent_checkpoint_sha256`,
-`stage_index`, overlay manifest key and SHA-256, and the headline metrics of
-each suite. An evaluation added later writes the same metric names with the
-evaluation dataset's version in the suite name, for example
-`eval/best/kitscenes_benchmark@kitscenes-val-v3.5/ade_3s`, so later results
-never overwrite earlier ones.
+| MLflow object | Created by | Holds |
+|---|---|---|
+| LoggedModel, one per distinct checkpoint | stage 6 with `initialize_logged_model(source_run_id=training run)` | params: flattened `DatasetSpec`, `TrainingSpec`, `gpu_profile`. tags: `checkpoint_sha256`, `checkpoint_role`, `lineage_sha256`, `dataset_id`, `dataset_lineage_sha256`, `parent_model_id`, `stage_index`, image digests, git commit. artifacts: the checkpoint, its checkpoint lineage, the dataset lineage copies, and its evaluation records |
+| Model version | `create_model_version(model_id=…)` | the same tags, so the registry list can be filtered on them |
+| Training run | stage 4 | training curves, Flyte execution id, Kueue queue, capacity reservation id. inputs: the training dataset (`training`) and the parent LoggedModel. outputs: the new LoggedModels |
+| Evaluation run, one per execution of stage 5 | stage 5 | inputs: the LoggedModel and each evaluation dataset (`eval:<suite>`) |
+| Metrics | `log_metric(model_id=…, dataset=…)` | every evaluation metric, attached to the LoggedModel and the MLflow Dataset it was measured on |
+| MLflow Dataset | `log_input` | name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, and a profile with `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and totals |
+
+Because metrics carry the dataset, the same metric name measured on two
+evaluation datasets stays two results, and an evaluation added a month later
+appears next to the original ones on the model page.
+`search_logged_models(datasets=[…])` lists every model evaluated on a given
+dataset, and the parent input on each training run makes the stage chain a
+graph that MLflow itself stores.
 
 ### 6.1 Lineage records
 
@@ -295,19 +305,19 @@ downstream.
 | Record | Written by | Location | One per |
 |---|---|---|---|
 | dataset lineage | stage 2, after the shards and before the by-id index | `<dataset>/vN.M/lineage/dataset.json` and `units.parquet` | published dataset |
-| checkpoint lineage | stage 6, or stage 5 for an imported checkpoint | MLflow run artifact `lineage/<checkpoint_sha256>.json` | distinct checkpoint |
-| evaluation record | stage 5 | MLflow run artifact `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` | checkpoint, suite, and evaluation dataset |
+| checkpoint lineage | stage 6, or stage 5 for an imported checkpoint | LoggedModel artifact `lineage/checkpoint.json` | distinct checkpoint |
+| evaluation record | stage 5 | LoggedModel artifact `evaluations/<suite>/<dataset_id>.json` | checkpoint, suite, and evaluation dataset |
 
 A dataset lineage is shared by every checkpoint trained on that dataset, so
-its canonical copy lives with the publication in S3. Every run that uses a
-dataset, for training or evaluation, also stores byte-identical copies of
-`dataset.json` and `units.parquet` under
+its canonical copy lives with the publication in S3. Every LoggedModel also
+stores byte-identical copies of `dataset.json` and `units.parquet` for its
+training dataset and for each dataset it was evaluated on, under
 `lineage/datasets/<dataset_id>/`. The copies are checked against the
-recorded SHA-256, so the hash chain holds, and MLflow alone stays enough to
-trace a checkpoint even if the S3 publication is gone. Checkpoint lineage
-and evaluation records live only on the MLflow run. Evaluation records are only ever added, so a
-checkpoint's history is the set of its records, and no earlier record is
-rewritten.
+recorded SHA-256, so the hash chain holds, and the model page alone is
+enough to trace a checkpoint even if the S3 publication is gone. Checkpoint
+lineage and evaluation records live only on the LoggedModel. Evaluation
+records are only ever added, so a checkpoint's history is the set of its
+records, and no earlier record is rewritten.
 
 #### Dataset lineage (`autoe2e_dataset_lineage_v1`)
 
@@ -351,7 +361,7 @@ have the same value even if their packs differ. `spec` repeats the
   "schema_version": "autoe2e_checkpoint_lineage_v1",
   "checkpoint": {"sha256": "…", "uri": "s3://…/best.pt", "role": "best", "epoch": 6, "step": 21333},
   "stage_index": 2,
-  "parent": {"model_version": "auto-e2e-driving-policy/66", "checkpoint_sha256": "…", "lineage_sha256": "…"},
+  "parent": {"model_id": "m-…", "model_version": "auto-e2e-driving-policy/66", "checkpoint_sha256": "…", "lineage_sha256": "…"},
   "dataset": {"dataset_id": "…", "lineage_uri": "s3://…/kitscenes/v3.6/lineage/dataset.json", "lineage_sha256": "…"},
   "split": {"policy": "kitscenes_train_dev_v4", "validation_units_sha256": "…", "validation_units": 40},
   "training": {"spec": {"gpu_profile": "RAY_8", "epochs": 10, "learning_rate": 3e-05, "per_rank_batch_size": 2, "seed": 149, "objectives": {}}, "flyte_execution_id": "…", "mlflow_run_id": "…", "image_digest": "sha256:…", "git_commit": "…", "kueue_queue": "p5en-capacity-block", "capacity_reservation_id": "cr-…"},
@@ -386,20 +396,10 @@ checkpoint, `dataset`, `split`, and `training` are
 instead of running the model is not an evaluation and is not written as
 one.
 
-#### Links into MLflow
-
-| Where | Key | Value |
-|---|---|---|
-| version tag | `lineage_sha256` | checkpoint lineage digest |
-| version tag | `dataset_id`, `dataset_lineage_sha256` | from the checkpoint lineage |
-| version tag | `eval.<suite>@<dataset>.<metric>` | headline metrics, copied from evaluation records |
-| run input | `mlflow.log_input` | an MLflow Dataset with name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, context `training` or `eval:<suite>`, and a profile holding `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and sample and shard totals |
-| run artifacts | `lineage/`, `lineage/datasets/`, `evaluations/` | the records themselves, including copies of every dataset lineage the run used |
-
 #### Verification
 
 `verify_lineage(model_version)` walks the chain and recomputes every digest:
-the version's checkpoint lineage, the dataset lineage and `units.parquet` in
+the LoggedModel's checkpoint lineage, the dataset lineage and `units.parquet` in
 S3, the raw snapshot manifest, the label records, each evaluation record,
 and then the parent's chain recursively. It fails on the first mismatch. The
 smoke launch plan runs it after registration, so a pipeline change that
@@ -407,14 +407,16 @@ breaks lineage fails the smoke run.
 
 ### 6.2 Questions this answers
 
-| Question | Where |
+All answers start from the model version page and stay inside MLflow.
+
+| Question | On the model page |
 |---|---|
-| Which data trained this checkpoint? | version tag `lineage_sha256` → checkpoint lineage `dataset` → dataset lineage |
-| Which raw bytes and upstream revision? | dataset lineage `raw` and `units.parquet` tar digests |
+| Which data trained this checkpoint? | the training dataset input and its profile; `lineage/datasets/<dataset_id>/dataset.json` |
+| Which raw bytes and upstream revision? | dataset lineage `raw`, and `units.parquet` tar digests per unit |
 | Which labels, from which teacher and prompt? | dataset lineage `spec.reasoning` and `labels`; `units.parquet` names every label record |
-| Which code packed and trained it? | dataset lineage `pack` and checkpoint lineage `training` |
-| What was it initialized from? | `parent`, recursively |
-| Every evaluation ever run on it, and on which data? | run metrics `eval/<role>/…`, inputs `eval:<suite>`, and `evaluations/<checkpoint_sha256>/` |
+| Which code packed and trained it? | dataset lineage `pack`; LoggedModel tags for the training image and commit |
+| What was it initialized from? | `parent_model_id`, which links to the parent's model page, recursively |
+| Every evaluation ever run on it, and on which data? | the LoggedModel metrics, each tied to its evaluation dataset, and `evaluations/` |
 
 ## 7. Launch Plans
 
