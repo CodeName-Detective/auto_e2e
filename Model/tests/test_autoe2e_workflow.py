@@ -164,6 +164,9 @@ def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
 
     monkeypatch.setattr(wf, "console_manifest_sha256", lambda s3, dataset, runtime: "m" * 64)
     monkeypatch.setattr(wf, "_s3", lambda: None)
+    from Platform.pipelines import reproducibility
+
+    monkeypatch.setattr(reproducibility, "container_digest_from_image", lambda image: "sha256:" + "e" * 64)
     handle = DatasetHandle("d" * 64, "kitscenes", "v3.7", True, "exec", partition_uris=["s3://d/p0/", "s3://d/p1/"])
     trained = wf.TrainedCheckpoints(trained=True, run_id="r" * 32, best_sha256="c" * 64)
     models = [wf.RegisteredModel("best", "m-1", "71", "s3://c/x.pt", "c" * 64, "l" * 64)]
