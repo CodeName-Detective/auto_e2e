@@ -1713,9 +1713,10 @@ def _kitscenes_single_worker_smoke_config() -> dict[str, object]:
         "per_rank_batch_size": 1,
         "precision": "bf16",
         "resume_checkpoint_uri": "",
-        "source_uris": [f"s3://datasets/kitscenes-{i:03d}" for i in range(10)],
+        # The whole corpus: the frozen validation split exists only there.
+        "source_uris": [f"s3://datasets/kitscenes-{i:03d}" for i in range(533)],
         "steps_per_epoch": 8,
-        "validation_sample_limit": 128,
+        "validation_sample_limit": 3820,
         "worker_cpus": 3,
     })
     return config
@@ -1734,7 +1735,7 @@ def test_validate_stage_config_accepts_single_worker_kitscenes_finetune_smoke():
         ({"steps_per_epoch": 17}, "single-worker smoke"),
         ({"per_rank_batch_size": 2}, "single-worker smoke"),
         ({"capacity_block_end_utc": "2099-01-01T00:00:00Z"}, "single-worker smoke"),
-        ({"source_uris": [f"s3://datasets/kitscenes-{i:03d}" for i in range(17)]}, "single-worker smoke"),
+        ({"gradient_accumulation_steps": 2}, "single-worker smoke"),
     ],
 )
 def test_validate_stage_config_bounds_single_worker_kitscenes_smoke(override, match):
