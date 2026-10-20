@@ -243,8 +243,3 @@ Flyte.
 - Automatic Capacity Block purchase. `Platform/README.md` keeps purchase as
   an operator action.
 - Multi-node training and EFA.
-
-## 8. Open Questions
-
-1. Does the Console need any version tag beyond those in 4.6 to find
-   overlays?
