@@ -146,7 +146,9 @@ def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         units=units,
         partitions=[[unit.unit_id] for unit in units],
         labels=spec.reasoning is not None,
-        console=True,
+        # A unit_limit build is a subset; publishing it to the Console would
+        # make it the Console's default (newest) KITScenes version.
+        console=spec.unit_limit == 0,
     )
 
 
