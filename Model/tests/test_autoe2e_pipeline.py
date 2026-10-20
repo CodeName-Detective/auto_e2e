@@ -164,3 +164,70 @@ def test_numeric_leaves_flatten_only_finite_numbers():
     assert numeric_leaves("", {"trajectory": {"ade_3s_m": 0.7, "ade_6p4s_m": None, "n": 3},
                                "route": {"available": False}, "x": float("nan")}) == {
         "trajectory.ade_3s_m": 0.7, "trajectory.n": 3.0}
+
+
+class ListingS3(S3):
+    def get_paginator(self, name):
+        s3 = self
+
+        class Paginator:
+            def paginate(self, *, Bucket, Prefix, Delimiter=None):
+                keys = sorted(k for b, k in s3.objects if b == Bucket and k.startswith(Prefix))
+                yield {"Contents": [
+                    {"Key": k, "Size": len(s3.objects[(Bucket, k)]),
+                     "ETag": f'"{sha256_bytes(s3.objects[(Bucket, k)])[:32]}"'}
+                    for k in keys
+                ]}
+
+        return Paginator()
+
+
+def _july_labels(s3, *, teacher_model="nvidia/Cosmos3-Nano", sample_unit="scene-a", count=1):
+    import json
+
+    prefix = "a2/run/abc"
+    meta = {"source_revision": "rev", "split": "train", "teacher": "openai_compatible",
+            "prompt_version": "p", "label_policy_version": "v2", "num_records": count}
+    s3.objects[("artifacts", f"{prefix}/meta.json")] = json.dumps(meta).encode()
+    rows = "\n".join(json.dumps({"sample_id": f"kitscenes-v1-{sample_unit}-f{i:06d}",
+                                 "teacher_model": teacher_model, "prompt_version": "p"})
+                     for i in range(count))
+    s3.objects[("artifacts", f"{prefix}/dataset=x/records.jsonl")] = rows.encode()
+    return f"s3://artifacts/{prefix}"
+
+
+def _adopt(monkeypatch, s3, uri, expected=1):
+    from Platform.pipelines import autoe2e_acquire
+    from Platform.pipelines.autoe2e_acquire import UnitSource, adopt_unit_labels
+    from Platform.pipelines.autoe2e_dataset import ReasoningSpec
+
+    monkeypatch.setattr(autoe2e_acquire, "_s3", lambda: s3)
+    return adopt_unit_labels.task_function(
+        dataset=AutoE2EDataset.KITSCENES, revision="rev",
+        reasoning=ReasoningSpec("openai_compatible", "nvidia/Cosmos3-Nano", "p", 10),
+        source=UnitSource("scene-a", "", uri, expected), datasets_bucket=BUCKET, adopted_from="snap",
+    )
+
+
+def test_adopted_labels_are_committed_once(monkeypatch):
+    s3 = ListingS3()
+    uri = _july_labels(s3)
+    first = _adopt(monkeypatch, s3, uri)
+    assert _adopt(monkeypatch, s3, uri) == first
+    assert any(k.startswith("kitscenes/_stages/labels/") for _, k in s3.objects)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected", "message"),
+    [
+        ({"teacher_model": "nvidia/Cosmos3-Super"}, 1, "teacher_model"),
+        ({"sample_unit": "scene-b"}, 1, "another unit"),
+        ({}, 2, "manifest"),
+    ],
+)
+def test_adoption_rejects_labels_that_do_not_match(monkeypatch, kwargs, expected, message):
+    s3 = ListingS3()
+    uri = _july_labels(s3, **kwargs)
+    with pytest.raises(ValueError, match=message):
+        _adopt(monkeypatch, s3, uri, expected)
+    assert not any(k.startswith("kitscenes/") for _, k in s3.objects)
