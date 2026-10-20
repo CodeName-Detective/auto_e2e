@@ -16,9 +16,9 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Annotated, List
 
-from flytekit import Resources, Secret, current_context, dynamic, map_task, task
+from flytekit import BatchSize, PodTemplate, Resources, Secret, current_context, dynamic, map_task, task
 from flytekit.types.directory import FlyteDirectory
 
 from Platform.pipelines.autoe2e_adapters import (
@@ -62,6 +62,16 @@ AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 _DATA_PREP_ENV = {"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE}
 # Read at registration and baked into the task, so dataset lineage names the code.
 _GIT_ENV = {"AUTO_E2E_GIT_COMMIT": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown")}
+# Long Cosmos calls and packs must not be consolidated away mid-run.
+_DO_NOT_DISRUPT = PodTemplate(annotations={"karpenter.sh/do-not-disrupt": "true"})
+
+
+def _teacher_model() -> str:
+    """The model the teacher endpoint serves, from the cosmos-teacher secret."""
+    try:
+        return current_context().secrets.get("cosmos-teacher", "COSMOS_TEACHER_MODEL")
+    except Exception:
+        return os.environ.get("COSMOS_TEACHER_MODEL", "")
 
 
 @dataclass
@@ -230,6 +240,7 @@ def resolve_dataset(spec: DatasetSpec, plan: SourcePlan, datasets_bucket: str) -
 
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
     requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
     limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="60Gi"),
     secret_requests=[
@@ -256,7 +267,7 @@ def label_unit(
     record = lookup_label_set(s3, bucket=datasets_bucket, dataset=spec.dataset, identity=identity)
     origin = "reused"
     if record is None:
-        served = os.environ.get("COSMOS_TEACHER_MODEL", "")
+        served = _teacher_model()
         if served != spec.reasoning.teacher_model:
             raise ValueError(
                 f"teacher endpoint serves {served!r}, spec names {spec.reasoning.teacher_model!r}"
@@ -307,10 +318,16 @@ def label_unit(
 
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
     requests=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
     limits=Resources(cpu="15", mem="64Gi", ephemeral_storage="240Gi"),
     retries=2,
     environment={"_F_P_WRITE_CHUNK_SIZE": "8388608"},
+    # Cached so a rerun of the same spec reuses the same pack output URIs:
+    # the write-once publication of a reserved version must see identical
+    # bytes, or a failed build could never be finished.
+    cache=True,
+    cache_version="autoe2e-pack-v1",
 )
 def pack_partition(
     spec: DatasetSpec,
@@ -319,24 +336,18 @@ def pack_partition(
     labels: List[UnitLabel],
     version: str,
     datasets_bucket: str,
-) -> FlyteDirectory:
-    """Pack one partition from snapshot units (and their labels)."""
+) -> Annotated[FlyteDirectory, BatchSize(4)]:
+    """Pack one partition from snapshot units (and their labels).
+
+    The cache key includes the spec (with its code-bound pack_version), the
+    plan, and the labels, so any change to what is packed misses the cache.
+    """
     s3 = _s3()
     unit_ids = plan.partitions[partition_index]
     if spec.dataset is AutoE2EDataset.NUPLAN:
-        from flytekit.types.file import FlyteFile
-
-        from Platform.pipelines.nuplan_dataset import pack_nuplan_snapshot_reactive_dataset
-
-        return pack_nuplan_snapshot_reactive_dataset.task_function(
-            snapshot_manifest=FlyteFile(spec.source_manifest.uri),
-            datasets_bucket=datasets_bucket,
-            archive_ids=list(unit_ids),
-            limit_total_scenarios=int(plan.partition_limits[partition_index]),
-            image_size=spec.image_size,
-            samples_per_shard=int(plan.pack_params["samples_per_shard"]),
-            max_rejection_fraction=float(plan.pack_params["max_rejection_fraction"]),
-            aws_region=AWS_REGION,
+        raise NotImplementedError(
+            "nuPlan Reactive packs carry no partition_id, which Ray's dataset plan "
+            "requires; the nuPlan packer must emit one before wf_autoe2e can build nuPlan"
         )
 
     from Platform.pipelines.workflows import Dataset, data_processing
