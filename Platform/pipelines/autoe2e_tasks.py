@@ -60,6 +60,8 @@ from Platform.pipelines.dataset_publication_tasks import (
 
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
 _DATA_PREP_ENV = {"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE}
+# Read at registration and baked into the task, so dataset lineage names the code.
+_GIT_ENV = {"AUTO_E2E_GIT_COMMIT": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown")}
 
 
 @dataclass
@@ -418,6 +420,7 @@ def publish_partition_view(
     requests=Resources(cpu="2", mem="4Gi"),
     limits=Resources(cpu="2", mem="4Gi"),
     retries=2,
+    environment=_GIT_ENV,
 )
 def commit_dataset(
     spec: DatasetSpec,
