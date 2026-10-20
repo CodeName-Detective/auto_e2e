@@ -138,7 +138,7 @@ def _publish(s3, spec, version, *, contracts=None):
         raw={"snapshot_manifest_sha256": "a" * 64}, labels=None,
         units=[UnitLineage("scene-a", "p-a", "k", "1" * 64, "2" * 64, None, None, None, 5, 0)],
         units_uri="s3://x", views={"key": views_manifest_key("kitscenes", version), "sha256": views_sha, "partition_ids": ["p-a"]},
-        console=None, pack={"contracts": pack_contracts()}, build={},
+        console=None, pack={"contracts": pack_contracts()}, build={"flyte_execution_id": "exec-1"},
     )
     _, lineage_sha = write_dataset_lineage(
         s3, bucket=BUCKET, published_name="kitscenes", version=version, record=record,
@@ -152,8 +152,9 @@ def test_unpublished_spec_reserves_the_next_version_once():
     s3 = S3()
     s3.put("kitscenes/v3.5/shards/manifest.json", b"{}")
     first = _resolve(s3)
-    assert (first.published, first.version) == (False, "v3.6")
-    assert _resolve(s3, execution="exec-2").version == "v3.6"
+    assert (first.published, first.version, first.reserved_by) == (False, "v3.6", "exec-1")
+    again = _resolve(s3, execution="exec-2")
+    assert (again.version, again.reserved_by) == ("v3.6", "exec-1")
 
 
 def test_different_specs_never_share_a_reserved_version():
@@ -166,7 +167,7 @@ def test_different_specs_never_share_a_reserved_version():
 def test_reservation_race_on_a_version_number_moves_on():
     s3 = S3()
     s3.put("kitscenes/_stages/versions/v1.0.json", b"{}")
-    assert reserve_version(s3, bucket=BUCKET, published_name="kitscenes", dataset_id="d" * 64, execution_id="e") == "v1.1"
+    assert reserve_version(s3, bucket=BUCKET, published_name="kitscenes", dataset_id="d" * 64, execution_id="e") == ("v1.1", "e")
 
 
 def test_committed_build_is_reused_with_partition_views():
@@ -273,7 +274,7 @@ def test_dataset_handle_round_trips_through_flyte():
 
     ctx = FlyteContextManager.current_context()
     for value, python_type in [
-        (DatasetHandle("a" * 64, "kitscenes", "v3.6", True, "b" * 64, "k", "c" * 64, 5, ["s3://x"]), DatasetHandle),
+        (DatasetHandle("a" * 64, "kitscenes", "v3.6", True, "exec-1", "b" * 64, "k", "c" * 64, 5, ["s3://x"]), DatasetHandle),
         (_spec(), DatasetSpec),
     ]:
         literal = TypeEngine.to_literal(ctx, value, python_type, TypeEngine.to_literal_type(python_type))
