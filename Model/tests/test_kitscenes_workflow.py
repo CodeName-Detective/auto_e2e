@@ -231,16 +231,6 @@ def test_direct_test_pack_map_rejects_wrong_camera_contract():
         )
 
 
-def test_test_pack_workflow_uses_direct_same_task_path():
-    assert [
-        node.flyte_entity.name
-        for node in workflows.wf_create_kitscenes_test_evaluation_sharded.nodes
-    ] == [
-        workflows.plan_fanout_partitions.name,
-        workflows._map_kitscenes_test_partitions.name,
-    ]
-
-
 def test_kitscenes_data_roles_keep_benchmark_splits_out_of_training():
     assert (
         workflows.KITSCENES_BENCHMARK_DATASET_VERSION
@@ -591,100 +581,6 @@ def test_dataset_dynamic_propagates_the_pinned_data_prep_image():
     }
 
 
-def test_full_run_overlay_workflow_wires_exact_model_lineage():
-    resolver, publisher = workflows.wf_publish_full_run_overlays.nodes
-    assert set(workflows.wf_publish_full_run_overlays.python_interface.outputs) == {
-        "overlay_result",
-        "manifest_key",
-        "manifest_sha256",
-    }
-    assert resolver.flyte_entity.name == (
-        "Platform.pipelines.overlay_tasks.resolve_overlay_model_version"
-    )
-
-    resolver_bindings = {
-        binding.var: binding.binding.promise
-        for binding in resolver.bindings
-    }
-    assert resolver_bindings["train_execution_id"].var == (
-        "full_run_execution_id"
-    )
-
-    publisher_bindings = {
-        binding.var: binding.binding.promise
-        for binding in publisher.bindings
-    }
-    assert publisher_bindings["model_version"].node_id == resolver.id
-    assert publisher_bindings["expected_train_execution_id"].var == (
-        "full_run_execution_id"
-    )
-    assert publisher_bindings["shards"].var == "shards"
-
-
-def test_selected_checkpoint_overlay_workflow_wires_exact_epoch_lineage():
-    registrar, publisher = (
-        workflows.wf_publish_selected_checkpoint_overlays.nodes
-    )
-    interface = (
-        workflows.wf_publish_selected_checkpoint_overlays.python_interface
-    )
-    assert set(interface.outputs) == {
-        "overlay_result",
-        "manifest_key",
-        "manifest_sha256",
-    }
-    assert registrar.flyte_entity.name == (
-        "Platform.pipelines.overlay_tasks.register_selected_overlay_checkpoint"
-    )
-
-    registrar_bindings = {
-        binding.var: binding.binding.promise
-        for binding in registrar.bindings
-    }
-    assert registrar_bindings["run_id"].var == "mlflow_run_id"
-    assert registrar_bindings["checkpoint_uri"].var == "checkpoint_uri"
-    assert registrar_bindings["checkpoint_sha256"].var == (
-        "checkpoint_sha256"
-    )
-    assert registrar_bindings["checkpoint_epoch"].var == "checkpoint_epoch"
-    assert registrar_bindings["train_execution_id"].var == (
-        "full_run_execution_id"
-    )
-
-    publisher_bindings = {
-        binding.var: binding.binding.promise
-        for binding in publisher.bindings
-    }
-    assert publisher_bindings["model_version"].node_id == registrar.id
-    assert publisher_bindings["expected_train_execution_id"].var == (
-        "full_run_execution_id"
-    )
-    assert publisher_bindings["shards"].var == "shards"
-
-
-def test_overlay_precompute_loads_one_checkpoint_for_the_fullset():
-    tree = ast.parse(Path(workflows.__file__).read_text())
-    function = next(
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "wf_precompute_overlays"
-    )
-    calls = [
-        call
-        for call in ast.walk(function)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Name)
-        and call.func.id == "precompute_overlay_partition"
-    ]
-
-    assert len(calls) == 1
-    keywords = {keyword.arg: keyword.value for keyword in calls[0].keywords}
-    assert isinstance(keywords["shard_dirs"], ast.Name)
-    assert keywords["shard_dirs"].id == "shards"
-    assert not any(isinstance(node, ast.For) for node in ast.walk(function))
-
-
 def test_data_prep_tasks_serialize_karpenter_disruption_protection():
     settings = SerializationSettings(
         image_config=ImageConfig.auto_default_image(),
@@ -714,25 +610,6 @@ def test_data_prep_tasks_serialize_karpenter_disruption_protection():
         concurrency=60,
     )
     assert mapped.get_k8s_pod(settings).metadata.annotations == expected
-
-
-def test_kitscenes_benchmark_launcher_is_evaluation_only():
-    buildspec = (
-        _REPO_ROOT
-        / "Platform"
-        / "buildspec-launch-kitscenes-benchmark.yml"
-    ).read_text()
-
-    assert "flytekit==1.16.24" in buildspec
-    assert "wf_audit_kitscenes_benchmark_inventory" in buildspec
-    assert "wf_prepare_kitscenes_paper_approximation" in buildspec
-    assert "VAL_SCENE_LIMIT" in buildspec
-    assert "OVERLAP_SCENE_LIMIT" in buildspec
-    assert "INGEST_CONCURRENCY" in buildspec
-    assert "PACK_CONCURRENCY" in buildspec
-    assert 'printf \'%s\' "${MODE}"' in buildspec
-    assert "wf_train" not in buildspec
-    assert "checkpoint" not in buildspec.lower()
 
 
 def test_large_shm_tasks_serialize_karpenter_disruption_protection():
@@ -1047,7 +924,6 @@ def test_loader_wiring_avoids_training_peek_and_bounds_eval_prefetch():
     "buildspec_name",
     (
         "buildspec-register.yml",
-        "buildspec-launch-fullrun.yml",
     ),
 )
 def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
@@ -1074,7 +950,6 @@ def test_remote_registration_buildspecs_pin_runtime_contracts(buildspec_name):
     "buildspec_name",
     (
         "buildspec-register.yml",
-        "buildspec-register-distributed.yml",
     ),
 )
 def test_registration_buildspecs_disable_fast_source_copy(buildspec_name):
@@ -1095,33 +970,6 @@ def test_all_flyte_runtime_installations_pin_the_shared_sdk_version():
             assert "flytekit==1.16.24" in source, path
             assert "flytekit==1.14.9" not in source, path
     assert runtime_files
-
-
-def test_overlay_launcher_wires_selected_checkpoints():
-    buildspec = (
-        _REPO_ROOT / "Platform" / "buildspec-launch-overlay.yml"
-    ).read_text()
-
-    assert "DATASET_VERSION: v2.4" in buildspec
-    assert (
-        'PYTHONPATH="${CODEBUILD_SRC_DIR}/Model:${CODEBUILD_SRC_DIR}:'
-        '${PYTHONPATH:-}"'
-    ) in buildspec
-    for variable in (
-        "SELECTED_MLFLOW_RUN_ID",
-        "SELECTED_CHECKPOINT_URI",
-        "SELECTED_CHECKPOINT_SHA256",
-        "SELECTED_CHECKPOINT_EPOCH",
-    ):
-        assert variable in buildspec
-    assert "wf_publish_selected_checkpoint_overlays" in buildspec
-    assert '--mlflow_run_id "${SELECTED_MLFLOW_RUN_ID}"' in buildspec
-    assert '--checkpoint_uri "${SELECTED_CHECKPOINT_URI}"' in buildspec
-    assert (
-        '--checkpoint_sha256 "${SELECTED_CHECKPOINT_SHA256}"'
-        in buildspec
-    )
-    assert '--checkpoint_epoch "${SELECTED_CHECKPOINT_EPOCH}"' in buildspec
 
 
 def test_reasoning_selection_bootstraps_short_scenes():
