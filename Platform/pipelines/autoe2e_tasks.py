@@ -38,6 +38,7 @@ from Platform.pipelines.autoe2e_dataset import (
 )
 from Platform.pipelines.autoe2e_labels import LabelIdentity, label_attempt_prefix, label_id, label_identity
 from Platform.pipelines.autoe2e_lineage import UnitLineage, dataset_lineage
+from Platform.pipelines.autoe2e_env import PIPELINE_ENV
 from Platform.pipelines.autoe2e_store import (
     DatasetHandle,
     claim_label_set,
@@ -562,7 +563,7 @@ def committed_label_uris(labels: List[UnitLabel]) -> Dict[str, str]:
     return {label.unit_id: label.artifact_uri for label in labels}
 
 
-@dynamic(container_image=DATA_PREP_IMAGE, environment=_DATA_PREP_ENV)
+@dynamic(container_image=DATA_PREP_IMAGE, environment={**_DATA_PREP_ENV, **PIPELINE_ENV})
 def build_dataset(
     spec: DatasetSpec,
     plan: SourcePlan,
