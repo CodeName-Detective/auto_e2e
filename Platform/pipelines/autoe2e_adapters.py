@@ -81,7 +81,9 @@ class SourcePlan:
     snapshot_manifest_sha256: str
     units: List[UnitRef] = field(default_factory=list)
     partitions: List[List[str]] = field(default_factory=list)
+    partition_limits: List[int] = field(default_factory=list)
     labels: bool = False
+    console: bool = False
     pack_params: Dict[str, str] = field(default_factory=dict)
 
 
@@ -144,6 +146,7 @@ def read_kitscenes(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         units=units,
         partitions=[[unit.unit_id] for unit in units],
         labels=spec.reasoning is not None,
+        console=True,
     )
 
 
