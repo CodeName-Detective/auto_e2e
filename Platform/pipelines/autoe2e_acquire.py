@@ -309,11 +309,26 @@ def adopt_unit_labels(
     validate_label_meta(meta, identity)
     if int(meta["num_records"]) != source.expected_label_count:
         raise ValueError(f"{source.unit_id}: label meta count differs from the recovery manifest")
+    records = 0
     for name, item in by_name.items():
-        if name.endswith("records.jsonl"):
-            body = s3.get_object(Bucket=bucket, Key=item["key"])["Body"].read().decode()
-            if body.strip() and source.unit_id not in body:
-                raise ValueError(f"{source.unit_id}: label records do not reference the unit")
+        if not name.endswith("records.jsonl"):
+            continue
+        body = s3.get_object(Bucket=bucket, Key=item["key"])["Body"].read().decode()
+        for line in body.splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            records += 1
+            # Every record names its sample, teacher model, and prompt; all three
+            # must match the identity the labels are adopted under.
+            if f"-{source.unit_id}-" not in str(row.get("sample_id", "")):
+                raise ValueError(f"{source.unit_id}: record {row.get('sample_id')!r} is for another unit")
+            if row.get("teacher_model") != reasoning.teacher_model:
+                raise ValueError(f"{source.unit_id}: record teacher_model {row.get('teacher_model')!r}")
+            if row.get("prompt_version") != reasoning.prompt_version:
+                raise ValueError(f"{source.unit_id}: record prompt_version {row.get('prompt_version')!r}")
+    if records != int(meta["num_records"]):
+        raise ValueError(f"{source.unit_id}: {records} records, meta says {meta['num_records']}")
     attempt = f"adopted-{adopted_from}"
     prefix = label_attempt_prefix(dataset, label_id(identity), attempt)
     for name, item in sorted(by_name.items()):
