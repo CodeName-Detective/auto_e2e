@@ -11,8 +11,8 @@ from __future__ import annotations
 import enum
 import json
 import re
-from dataclasses import asdict, dataclass
-from typing import Any, Iterable, Mapping, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, Iterable, Mapping, Optional
 
 from Platform.pipelines.dataset_publication import (
     PUBLICATION_SCHEMA,
@@ -34,6 +34,7 @@ class AutoE2EDataset(enum.Enum):
 
     KITSCENES = "kitscenes"
     NUPLAN = "nuplan"
+    L2D = "l2d"
 
 
 @dataclass(frozen=True)
@@ -54,26 +55,40 @@ class ReasoningSpec:
 
 @dataclass(frozen=True)
 class DatasetSpec:
+    """What a dataset contains. Every field enters ``dataset_id``.
+
+    ``source_manifest`` is a raw snapshot manifest; it pins the unit list and
+    the upstream revision. ``pack_params`` carries adapter-specific pack
+    inputs as strings so the workflow signature is the same for every dataset.
+    """
+
     dataset: AutoE2EDataset
-    source_revision: str
-    split_manifest: ManifestRef
+    source_manifest: ManifestRef
     pack_version: str
     image_size: int
+    unit_limit: int = 0
+    pack_params: Dict[str, str] = field(default_factory=dict)
     reasoning: Optional[ReasoningSpec] = None
+
+
+def validate_manifest_ref(ref: ManifestRef, name: str) -> None:
+    if not _S3_URI_RE.fullmatch(ref.uri):
+        raise ValueError(f"{name} uri is not an S3 object: {ref.uri!r}")
+    if not ref.version_id:
+        raise ValueError(f"{name} version_id is required")
+    if not _SHA256_RE.fullmatch(ref.sha256):
+        raise ValueError(f"{name} sha256 must be 64 lowercase hex digits")
 
 
 def validate_dataset_spec(spec: DatasetSpec) -> None:
     if not isinstance(spec.dataset, AutoE2EDataset):
         raise ValueError(f"unsupported dataset {spec.dataset!r}")
-    if not spec.source_revision:
-        raise ValueError("source_revision is required")
-    ref = spec.split_manifest
-    if not _S3_URI_RE.fullmatch(ref.uri):
-        raise ValueError(f"split_manifest uri is not an S3 object: {ref.uri!r}")
-    if not ref.version_id:
-        raise ValueError("split_manifest version_id is required")
-    if not _SHA256_RE.fullmatch(ref.sha256):
-        raise ValueError("split_manifest sha256 must be 64 lowercase hex digits")
+    validate_manifest_ref(spec.source_manifest, "source_manifest")
+    if spec.unit_limit < 0:
+        raise ValueError("unit_limit must be zero or positive")
+    for key, value in spec.pack_params.items():
+        if not isinstance(key, str) or not key or not isinstance(value, str):
+            raise ValueError(f"pack_params must map non-empty strings: {key!r}")
     if not spec.pack_version:
         raise ValueError("pack_version is required")
     if spec.image_size <= 0:
@@ -90,6 +105,7 @@ def canonical_dataset_spec(spec: DatasetSpec) -> dict[str, Any]:
     validate_dataset_spec(spec)
     payload = asdict(spec)
     payload["dataset"] = spec.dataset.value
+    payload["pack_params"] = dict(sorted(spec.pack_params.items()))
     payload["schema_version"] = DATASET_SPEC_SCHEMA
     return payload
 
