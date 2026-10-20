@@ -231,3 +231,21 @@ def test_adoption_rejects_labels_that_do_not_match(monkeypatch, kwargs, expected
     with pytest.raises(ValueError, match=message):
         _adopt(monkeypatch, s3, uri, expected)
     assert not any(k.startswith("kitscenes/") for _, k in s3.objects)
+
+
+def test_tar_tree_keeps_one_file_open_at_a_time(tmp_path):
+    import resource
+
+    from Platform.pipelines.autoe2e_acquire import tar_tree
+
+    root = tmp_path / "tree"
+    root.mkdir()
+    for i in range(300):
+        (root / f"f{i:04d}.bin").write_bytes(b"x")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (128, hard))
+    try:
+        members = tar_tree(root, "u", tmp_path / "u.tar")
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert len(members) == 300
