@@ -111,9 +111,8 @@ class _S3:
 def _spec(**overrides) -> DatasetSpec:
     values = dict(
         dataset=AutoE2EDataset.KITSCENES,
-        source_revision="rev",
-        split_manifest=ManifestRef(
-            uri="s3://checkpoints/recovery-manifests/a.json",
+        source_manifest=ManifestRef(
+            uri="s3://datasets/kitscenes/raw-snapshots/rev/snap/manifest.json",
             version_id="v1",
             sha256="a" * 64,
         ),
