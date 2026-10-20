@@ -63,10 +63,10 @@ def test_materialize_rebuilds_the_tree_and_checks_the_tar_digest(tmp_path):
     s3 = S3()
     payload = _unit_tar("scene-a", {"data/train/scene-a/x.jpg": b"jpg", "data/sequence_archives.csv": b"csv"})
     s3.objects[(BUCKET, "k/scene-a.tar")] = payload
-    unit = UnitRef("scene-a", "k/scene-a.tar", sha256_bytes(payload), "k/i.jsonl", "0" * 64)
+    unit = UnitRef("scene-a", "k/scene-a.tar", "sha256:" + sha256_bytes(payload), "k/i.jsonl", "0" * 64)
     materialize_units(s3, BUCKET, [unit], tmp_path / "raw")
     assert (tmp_path / "raw/data/train/scene-a/x.jpg").read_bytes() == b"jpg"
-    bad = UnitRef("scene-a", "k/scene-a.tar", "f" * 64, "k/i.jsonl", "0" * 64)
+    bad = UnitRef("scene-a", "k/scene-a.tar", "sha256:" + "f" * 64, "k/i.jsonl", "0" * 64)
     with pytest.raises(ValueError, match="differs"):
         materialize_units(s3, BUCKET, [bad], tmp_path / "raw2")
 
@@ -75,7 +75,7 @@ def _plan(units, partitions, labels=True, dataset=AutoE2EDataset.KITSCENES):
     return SourcePlan(
         dataset=dataset, upstream="u", revision="r", split="train", published_name="kitscenes",
         snapshot_manifest_sha256="a" * 64,
-        units=[UnitRef(u, f"k/{u}.tar", "1" * 64, f"k/{u}.jsonl", "2" * 64) for u in units],
+        units=[UnitRef(u, f"k/{u}.tar", "sha256:" + "1" * 64, f"k/{u}.jsonl", "2" * 64) for u in units],
         partitions=partitions, labels=labels,
     )
 
@@ -103,11 +103,24 @@ def test_unit_rows_reject_missing_labels_or_partitions():
 
 
 def test_nuplan_archives_are_shared_units():
+    from Platform.pipelines.autoe2e_lineage import units_jsonl
     from Platform.pipelines.autoe2e_tasks import PartitionView, unit_rows
 
     plan = _plan(["maps", "db-1"], [["maps", "db-1"]], labels=False, dataset=AutoE2EDataset.NUPLAN)
+    plan.units = [UnitRef(u, f"k/{u}.zip", "crc64nvme:8BLx0oBv5Jo=", "", "") for u in ("maps", "db-1")]
     rows = unit_rows(plan, [], [PartitionView("g0", "p", "7" * 64, 10, ["maps", "db-1"])])
     assert {r.partition_id for r in rows} == {"*"}
+    assert {r.raw_index_sha256 for r in rows} == {None}
+    assert units_jsonl(rows)
+
+
+def test_nuplan_archive_digest_prefers_sha256_then_crc64nvme():
+    from Platform.pipelines.autoe2e_adapters import nuplan_archive_digest
+
+    assert nuplan_archive_digest({"sha256": "a" * 64, "checksum_crc64nvme": "x"}) == "sha256:" + "a" * 64
+    assert nuplan_archive_digest({"sha256": "", "checksum_crc64nvme": "8BLx0oBv5Jo="}) == "crc64nvme:8BLx0oBv5Jo="
+    with pytest.raises(ValueError, match="pins no digest"):
+        nuplan_archive_digest({"archive_id": "db-x", "sha256": "", "checksum_crc64nvme": ""})
 
 
 def test_acquired_unit_tar_is_deterministic_and_indexed(tmp_path):
