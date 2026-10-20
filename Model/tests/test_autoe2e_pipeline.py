@@ -249,3 +249,32 @@ def test_tar_tree_keeps_one_file_open_at_a_time(tmp_path):
     finally:
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
     assert len(members) == 300
+
+
+def test_overlay_metadata_names_the_registered_version_and_validation_metrics():
+    from Platform.pipelines.autoe2e import RegisteredModel, TrainingSpec, overlay_metadata
+
+    model = RegisteredModel("best", "m-abc", "71", "s3://ckpt/autoe2e/checkpoints/x.pt", "c" * 64, "l" * 64)
+    metadata = overlay_metadata(
+        model=model, run_id="r" * 32, dataset_source="KIT-MRT/KITScenes-Multimodal", dataset_version="v3.7",
+        training=TrainingSpec(), metrics_json='{"ade_6p4s_m": 2.5, "fde_6p4s_m": 6.0, "route": {"x": 1}}',
+        execution_id="exec",
+    )
+    assert metadata["registered_model_name"] == "auto-e2e-driving-policy"
+    assert metadata["model_version"] == "71"
+    assert metadata["artifact_uri"] == "models:/m-abc"
+    assert (metadata["eval_ade"], metadata["eval_fde"]) == (2.5, 6.0)
+    assert metadata["checkpoint_sha256"] == "c" * 64
+
+
+def test_overlays_need_a_console_publication(monkeypatch):
+    from Platform.pipelines import autoe2e_store
+    from Platform.pipelines.autoe2e import RuntimeOptions, console_manifest_sha256
+    from Platform.pipelines.autoe2e_store import DatasetHandle
+
+    handle = DatasetHandle("d" * 64, "kitscenes", "v3.7", True, "exec", lineage_key="k", lineage_sha256="s")
+    runtime = RuntimeOptions(datasets_bucket=BUCKET)
+    for console, expected in (({"manifest_sha256": "m" * 64}, "m" * 64), (None, "")):
+        monkeypatch.setattr(autoe2e_store, "read_dataset_lineage",
+                            lambda s3, *, bucket, key, sha256, c=console: {"console": c})
+        assert console_manifest_sha256(S3(), handle, runtime) == expected
