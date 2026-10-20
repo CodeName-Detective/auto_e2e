@@ -49,6 +49,7 @@ class ManifestRef:
 @dataclass(frozen=True)
 class ReasoningSpec:
     teacher: str
+    teacher_model: str
     prompt_version: str
     label_stride: int
 
@@ -94,8 +95,12 @@ def validate_dataset_spec(spec: DatasetSpec) -> None:
     if spec.image_size <= 0:
         raise ValueError("image_size must be positive")
     if spec.reasoning is not None:
-        if not spec.reasoning.teacher or not spec.reasoning.prompt_version:
-            raise ValueError("reasoning teacher and prompt_version are required")
+        if not (
+            spec.reasoning.teacher
+            and spec.reasoning.teacher_model
+            and spec.reasoning.prompt_version
+        ):
+            raise ValueError("reasoning teacher, teacher_model, and prompt_version are required")
         if spec.reasoning.label_stride <= 0:
             raise ValueError("reasoning label_stride must be positive")
 
