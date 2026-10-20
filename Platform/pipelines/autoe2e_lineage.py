@@ -28,11 +28,15 @@ CHECKPOINT_LINEAGE_SCHEMA = "autoe2e_checkpoint_lineage_v1"
 EVALUATION_SCHEMA = "autoe2e_evaluation_v1"
 UNKNOWN = {"status": "unknown"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Raw bytes are pinned by SHA-256 when this code wrote them, and by the S3
+# full-object CRC64NVME when S3 copied them (the nuPlan archives), so the
+# digest names its algorithm.
+_RAW_DIGEST_RE = re.compile(r"^(sha256:[0-9a-f]{64}|crc64nvme:[A-Za-z0-9+/]{11}=)$")
 _UNIT_FIELDS = (
     "unit_id",
     "partition_id",
     "raw_tar_key",
-    "raw_tar_sha256",
+    "raw_tar_digest",
     "raw_index_sha256",
     "label_id",
     "label_record_sha256",
@@ -56,13 +60,19 @@ def _sha(value: Any, what: str) -> str:
     return value
 
 
+def raw_digest(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not _RAW_DIGEST_RE.fullmatch(value):
+        raise ValueError(f"{what} must be sha256:<hex> or crc64nvme:<base64>, got {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class UnitLineage:
     unit_id: str
     partition_id: str
     raw_tar_key: str
-    raw_tar_sha256: str
-    raw_index_sha256: str
+    raw_tar_digest: str
+    raw_index_sha256: Optional[str]  # None for an archive without a member index
     label_id: Optional[str]
     label_record_sha256: Optional[str]
     label_origin: Optional[str]  # "adopted", "created", or None without labels
@@ -81,8 +91,9 @@ def units_jsonl(units: Sequence[UnitLineage]) -> bytes:
     if not ids or len(set(ids)) != len(ids):
         raise ValueError("units must be non-empty and unique")
     for unit in rows:
-        _sha(unit.raw_tar_sha256, f"{unit.unit_id} raw_tar_sha256")
-        _sha(unit.raw_index_sha256, f"{unit.unit_id} raw_index_sha256")
+        raw_digest(unit.raw_tar_digest, f"{unit.unit_id} raw_tar_digest")
+        if unit.raw_index_sha256 is not None:
+            _sha(unit.raw_index_sha256, f"{unit.unit_id} raw_index_sha256")
         labelled = unit.label_id is not None
         if labelled != (unit.label_record_sha256 is not None) or labelled != (
             unit.label_origin is not None
