@@ -58,7 +58,9 @@ class _Client:
         from mlflow.exceptions import MlflowException
 
         if name in self.registered:
-            raise MlflowException("RESOURCE_ALREADY_EXISTS: exists")
+            from mlflow.protos.databricks_pb2 import RESOURCE_ALREADY_EXISTS
+
+            raise MlflowException("exists", error_code=RESOURCE_ALREADY_EXISTS)
         self.registered.add(name)
 
     def search_model_versions(self, filter_string):
@@ -150,11 +152,19 @@ def test_version_points_at_the_logged_model_and_is_reused():
     assert REGISTERED_MODEL in client.registered
 
 
-def test_version_pointing_elsewhere_is_an_error():
+def test_pre_pipeline_versions_with_the_same_tag_are_ignored():
+    client = _Client()
+    model = _ensure(client)
+    client.versions.append(SimpleNamespace(version=1, source="s3://old/checkpoint.pt", run_id="old",
+                                           tags={"checkpoint_sha256": H("c")}, description=""))
+    assert ensure_version(client, model=model, run_id="run-1") == "2"
+
+
+def test_version_pointing_at_another_logged_model_is_an_error():
     client = _Client()
     model = _ensure(client)
     ensure_version(client, model=model, run_id="run-1")
-    client.versions[0].source = "s3://somewhere/else.pt"
+    client.versions[0].source = "models:/m-other"
     with pytest.raises(RuntimeError, match="points at"):
         ensure_version(client, model=model, run_id="run-1")
 
@@ -173,8 +183,9 @@ def _lineage():
 
 def test_dataset_entity_carries_profile_and_digest():
     dataset = mlflow_dataset(dataset_lineage=_lineage(), dataset_lineage_sha256=H("4"), index_uri="s3://b/by-id/x.json")
-    assert dataset.name == "kitscenes-val/v3.5" and dataset.digest == H("d")
+    assert dataset.name == "kitscenes-val/v3.5" and dataset.digest == H("d")[:32]
     profile = json.loads(dataset.profile)
+    assert profile["dataset_id"] == H("d")
     assert profile["dataset_lineage_sha256"] == H("4") and profile["label_set_sha256"] is None
     assert json.loads(dataset.source) == {"url": "s3://b/by-id/x.json"}
 
@@ -189,8 +200,8 @@ def test_evaluation_metrics_attach_to_the_model_and_dataset():
         suite="kitscenes_benchmark", record_payload=b"{}", record_name=f"{H('d')}.json",
     )
     assert {(m.key, m.model_id, m.dataset_digest) for m in client.metrics} == {
-        ("eval/kitscenes_benchmark/ade_3s", model.model_id, H("d")),
-        ("eval/kitscenes_benchmark/fde_3s", model.model_id, H("d")),
+        ("eval/kitscenes_benchmark/ade_3s", model.model_id, H("d")[:32]),
+        ("eval/kitscenes_benchmark/fde_3s", model.model_id, H("d")[:32]),
     }
     run_id, datasets, models = client.inputs[0]
     assert run_id == "eval-1" and models[0].model_id == model.model_id
