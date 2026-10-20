@@ -1,0 +1,268 @@
+"""Lineage records: a hash chain from raw bytes to every evaluation.
+
+Three write-once records, each canonical JSON identified by its SHA-256:
+
+- dataset lineage: one per published dataset, with a ``units.parquet`` row
+  per unit naming its raw tar and label record;
+- checkpoint lineage: one per distinct checkpoint, naming its dataset
+  lineage and its parent checkpoint lineage;
+- evaluation record: one per checkpoint, suite, and evaluation dataset.
+
+A record refers to another only by URI plus SHA-256, so changing any byte
+upstream breaks every digest downstream.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Mapping, Optional, Sequence
+
+from Platform.pipelines.dataset_publication import canonical_json_bytes, sha256_bytes
+
+
+DATASET_LINEAGE_SCHEMA = "autoe2e_dataset_lineage_v1"
+CHECKPOINT_LINEAGE_SCHEMA = "autoe2e_checkpoint_lineage_v1"
+EVALUATION_SCHEMA = "autoe2e_evaluation_v1"
+UNKNOWN = {"status": "unknown"}
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_UNIT_COLUMNS = (
+    "unit_id",
+    "partition_id",
+    "raw_tar_key",
+    "raw_tar_sha256",
+    "raw_index_sha256",
+    "label_id",
+    "label_record_sha256",
+    "label_origin",
+    "sample_count",
+    "label_count",
+)
+
+
+def record_bytes(record: Mapping[str, Any]) -> bytes:
+    return canonical_json_bytes(dict(record))
+
+
+def record_sha256(record: Mapping[str, Any]) -> str:
+    return sha256_bytes(record_bytes(record))
+
+
+def _sha(value: Any, what: str) -> str:
+    if not isinstance(value, str) or not _SHA256_RE.fullmatch(value):
+        raise ValueError(f"{what} must be a SHA-256 hex digest, got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class UnitLineage:
+    unit_id: str
+    partition_id: str
+    raw_tar_key: str
+    raw_tar_sha256: str
+    raw_index_sha256: str
+    label_id: Optional[str]
+    label_record_sha256: Optional[str]
+    label_origin: Optional[str]  # "reused", "created", or None without labels
+    sample_count: int
+    label_count: int
+
+
+def units_parquet(units: Sequence[UnitLineage]) -> bytes:
+    """Serialize unit rows deterministically, sorted by unit id."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows = sorted(units, key=lambda unit: unit.unit_id)
+    ids = [unit.unit_id for unit in rows]
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("units must be non-empty and unique")
+    for unit in rows:
+        _sha(unit.raw_tar_sha256, f"{unit.unit_id} raw_tar_sha256")
+        _sha(unit.raw_index_sha256, f"{unit.unit_id} raw_index_sha256")
+        labelled = unit.label_id is not None
+        if labelled != (unit.label_record_sha256 is not None) or labelled != (
+            unit.label_origin is not None
+        ):
+            raise ValueError(f"{unit.unit_id}: label fields must be all set or all null")
+        if labelled:
+            _sha(unit.label_id, f"{unit.unit_id} label_id")
+            _sha(unit.label_record_sha256, f"{unit.unit_id} label_record_sha256")
+            if unit.label_origin not in {"reused", "created"}:
+                raise ValueError(f"{unit.unit_id}: invalid label_origin")
+        if unit.sample_count < 0 or unit.label_count < 0:
+            raise ValueError(f"{unit.unit_id}: counts must not be negative")
+    table = pa.table({
+        "unit_id": pa.array(ids, pa.string()),
+        "partition_id": pa.array([u.partition_id for u in rows], pa.string()),
+        "raw_tar_key": pa.array([u.raw_tar_key for u in rows], pa.string()),
+        "raw_tar_sha256": pa.array([u.raw_tar_sha256 for u in rows], pa.string()),
+        "raw_index_sha256": pa.array([u.raw_index_sha256 for u in rows], pa.string()),
+        "label_id": pa.array([u.label_id for u in rows], pa.string()),
+        "label_record_sha256": pa.array([u.label_record_sha256 for u in rows], pa.string()),
+        "label_origin": pa.array([u.label_origin for u in rows], pa.string()),
+        "sample_count": pa.array([u.sample_count for u in rows], pa.int64()),
+        "label_count": pa.array([u.label_count for u in rows], pa.int64()),
+    })
+    out = io.BytesIO()
+    pq.write_table(table, out, compression="zstd", write_statistics=False, store_schema=False)
+    return out.getvalue()
+
+
+def read_units_parquet(payload: bytes) -> list[UnitLineage]:
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(io.BytesIO(payload))
+    if tuple(table.column_names) != _UNIT_COLUMNS:
+        raise ValueError(f"units columns {table.column_names} != {_UNIT_COLUMNS}")
+    rows = table.to_pylist()
+    return [UnitLineage(**row) for row in rows]
+
+
+def dataset_lineage(
+    *,
+    dataset_id: str,
+    spec: Mapping[str, Any],
+    published: Mapping[str, str],
+    raw: Mapping[str, Any],
+    labels: Optional[Mapping[str, Any]],
+    units: Sequence[UnitLineage],
+    units_uri: str,
+    pack: Mapping[str, Any],
+    build: Mapping[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    """Return ``(dataset.json record, units.parquet bytes)``."""
+    from Platform.pipelines.autoe2e_labels import label_set_sha256
+
+    _sha(dataset_id, "dataset_id")
+    _sha(published["manifest_sha256"], "published manifest_sha256")
+    _sha(raw["snapshot_manifest_sha256"], "raw snapshot_manifest_sha256")
+    payload = units_parquet(units)
+    labelled = [u for u in units if u.label_id is not None]
+    if labels is None:
+        if labelled:
+            raise ValueError("units carry labels but the dataset has none")
+        label_summary = None
+    else:
+        if len(labelled) != len(units):
+            raise ValueError("a labelled dataset needs a label set for every unit")
+        label_summary = {
+            **dict(labels),
+            "label_set_sha256": label_set_sha256(
+                (u.unit_id, u.label_id, u.label_record_sha256) for u in labelled
+            ),
+            "reused": sum(u.label_origin == "reused" for u in labelled),
+            "created": sum(u.label_origin == "created" for u in labelled),
+        }
+    record = {
+        "schema_version": DATASET_LINEAGE_SCHEMA,
+        "dataset_id": dataset_id,
+        "spec": dict(spec),
+        "published": dict(published),
+        "raw": {**dict(raw), "units": len(units)},
+        "labels": label_summary,
+        "units": {"uri": units_uri, "sha256": sha256_bytes(payload), "rows": len(units)},
+        "pack": dict(pack),
+        "build": dict(build),
+        "totals": {
+            "samples": sum(u.sample_count for u in units),
+            "reasoning_labels": sum(u.label_count for u in units),
+        },
+    }
+    return record, payload
+
+
+def checkpoint_lineage(
+    *,
+    checkpoint: Mapping[str, Any],
+    parent: Optional[Mapping[str, Any]],
+    dataset: Optional[Mapping[str, Any]],
+    split: Optional[Mapping[str, Any]],
+    training: Optional[Mapping[str, Any]],
+    selection: Optional[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build a checkpoint lineage record.
+
+    ``dataset``, ``split``, and ``training`` are None only for an imported
+    checkpoint, and are then written as ``{"status": "unknown"}``.
+    """
+    _sha(checkpoint["sha256"], "checkpoint sha256")
+    if checkpoint.get("role") not in {"best", "final", "imported"}:
+        raise ValueError(f"invalid checkpoint role {checkpoint.get('role')!r}")
+    imported = checkpoint["role"] == "imported"
+    known = [dataset, split, training]
+    if imported and any(value is not None for value in known):
+        raise ValueError("an imported checkpoint has unknown dataset, split, and training")
+    if not imported and any(value is None for value in known):
+        raise ValueError("a trained checkpoint needs dataset, split, and training")
+    if parent is not None:
+        _sha(parent["checkpoint_sha256"], "parent checkpoint_sha256")
+        _sha(parent["lineage_sha256"], "parent lineage_sha256")
+        stage_index = int(parent["stage_index"]) + 1
+    else:
+        stage_index = 0 if imported else 1
+    if dataset is not None:
+        _sha(dataset["dataset_id"], "dataset_id")
+        _sha(dataset["lineage_sha256"], "dataset lineage_sha256")
+    return {
+        "schema_version": CHECKPOINT_LINEAGE_SCHEMA,
+        "checkpoint": dict(checkpoint),
+        "stage_index": stage_index,
+        "parent": None if parent is None else dict(parent),
+        "dataset": UNKNOWN if dataset is None else dict(dataset),
+        "split": UNKNOWN if split is None else dict(split),
+        "training": UNKNOWN if training is None else dict(training),
+        "selection": None if selection is None else dict(selection),
+    }
+
+
+def evaluation_record(
+    *,
+    checkpoint_sha256: str,
+    checkpoint_lineage_sha256: str,
+    suite: str,
+    dataset: Mapping[str, Any],
+    protocol: Mapping[str, Any],
+    metrics: Mapping[str, float],
+    per_sample: Mapping[str, Any],
+    code: Mapping[str, str],
+    flyte_execution_id: str,
+    finished_at: str,
+) -> dict[str, Any]:
+    _sha(checkpoint_sha256, "checkpoint_sha256")
+    _sha(checkpoint_lineage_sha256, "checkpoint_lineage_sha256")
+    _sha(dataset["dataset_id"], "evaluation dataset_id")
+    _sha(per_sample["sha256"], "per_sample sha256")
+    if not metrics:
+        raise ValueError("an evaluation needs at least one metric")
+    for name, value in metrics.items():
+        if not isinstance(value, (int, float)) or value != value:
+            raise ValueError(f"metric {name} is not a finite number")
+    return {
+        "schema_version": EVALUATION_SCHEMA,
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_lineage_sha256": checkpoint_lineage_sha256,
+        "suite": suite,
+        "dataset": dict(dataset),
+        "protocol": dict(protocol),
+        "model_reexecuted": True,
+        "metrics": {name: float(value) for name, value in sorted(metrics.items())},
+        "per_sample": dict(per_sample),
+        "code": dict(code),
+        "flyte_execution_id": flyte_execution_id,
+        "finished_at": finished_at,
+    }
+
+
+def parse_record(payload: bytes, *, expected_sha256: str, schema: str) -> dict[str, Any]:
+    """Parse a record only if its bytes are canonical and match the digest."""
+    if sha256_bytes(payload) != expected_sha256:
+        raise ValueError(f"{schema} bytes differ from the recorded SHA-256")
+    record = json.loads(payload)
+    if record.get("schema_version") != schema:
+        raise ValueError(f"expected {schema}, got {record.get('schema_version')!r}")
+    if record_bytes(record) != payload:
+        raise ValueError(f"{schema} is not canonical JSON")
+    return record
