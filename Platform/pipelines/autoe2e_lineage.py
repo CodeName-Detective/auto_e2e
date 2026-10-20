@@ -65,7 +65,7 @@ class UnitLineage:
     raw_index_sha256: str
     label_id: Optional[str]
     label_record_sha256: Optional[str]
-    label_origin: Optional[str]  # "reused", "created", or None without labels
+    label_origin: Optional[str]  # "adopted", "created", or None without labels
     sample_count: int
     label_count: int
 
@@ -91,7 +91,7 @@ def units_jsonl(units: Sequence[UnitLineage]) -> bytes:
         if labelled:
             _sha(unit.label_id, f"{unit.unit_id} label_id")
             _sha(unit.label_record_sha256, f"{unit.unit_id} label_record_sha256")
-            if unit.label_origin not in {"reused", "created"}:
+            if unit.label_origin not in {"adopted", "created"}:
                 raise ValueError(f"{unit.unit_id}: invalid label_origin")
         if unit.sample_count < 0 or unit.label_count < 0:
             raise ValueError(f"{unit.unit_id}: counts must not be negative")
@@ -153,7 +153,7 @@ def dataset_lineage(
             "label_set_sha256": label_set_sha256(
                 (u.unit_id, u.label_id, u.label_record_sha256) for u in labelled
             ),
-            "reused": sum(u.label_origin == "reused" for u in labelled),
+            "adopted": sum(u.label_origin == "adopted" for u in labelled),
             "created": sum(u.label_origin == "created" for u in labelled),
         }
     record = {
