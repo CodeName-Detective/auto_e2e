@@ -28,6 +28,7 @@ IDENTITY_KEYS = (
     "stage_index",
 )
 _MAX_PARAM_VALUE = 6000
+DATASET_DIGEST_CHARS = 32
 
 
 def mlflow_dataset(
@@ -46,6 +47,7 @@ def mlflow_dataset(
     published = dataset_lineage["published"]
     labels = dataset_lineage.get("labels") or {}
     profile = {
+        "dataset_id": dataset_lineage["dataset_id"],
         "dataset_lineage_sha256": dataset_lineage_sha256,
         "snapshot_manifest_sha256": dataset_lineage["raw"]["snapshot_manifest_sha256"],
         "label_set_sha256": labels.get("label_set_sha256"),
@@ -55,7 +57,9 @@ def mlflow_dataset(
     }
     return Dataset(
         name=f"{published['name']}/{published['version']}",
-        digest=dataset_lineage["dataset_id"],
+        # MLflow caps dataset digests at 36 characters; the full id is in the
+        # profile and the source URI.
+        digest=dataset_lineage["dataset_id"][:DATASET_DIGEST_CHARS],
         source_type="http",
         source=json.dumps({"url": index_uri}),
         profile=json.dumps(profile, sort_keys=True),
@@ -150,14 +154,18 @@ def ensure_logged_model(
     if existing is not None:
         if dict(existing.params) != dict(params):
             raise RuntimeError(f"LoggedModel {existing.model_id} has different params for {sha}")
-        return existing
-    model = client.create_logged_model(
-        experiment_id=experiment,
-        name=name,
-        source_run_id=source_run_id,
-        params=dict(params),
-        tags={DESCRIPTION_TAG: description_text},
-    )
+        if str(existing.status) == "READY" or getattr(existing.status, "name", "") == "READY":
+            return existing
+        # A retry after a crash between create and finalize: finish it.
+        model = existing
+    else:
+        model = client.create_logged_model(
+            experiment_id=experiment,
+            name=name,
+            source_run_id=source_run_id,
+            params=dict(params),
+            tags={DESCRIPTION_TAG: description_text},
+        )
     with tempfile.TemporaryDirectory() as root:
         for relative, payload in artifacts.items():
             path = Path(root, relative)
@@ -175,12 +183,18 @@ def ensure_version(client, *, model, run_id: Optional[str]) -> str:
     try:
         client.create_registered_model(REGISTERED_MODEL)
     except MlflowException as error:
-        if "RESOURCE_ALREADY_EXISTS" not in str(error):
+        if error.error_code != "RESOURCE_ALREADY_EXISTS":
             raise
     sha = model.params["checkpoint_sha256"]
-    found = list(client.search_model_versions(
-        f"name = '{REGISTERED_MODEL}' and tags.checkpoint_sha256 = '{sha}'"
-    ))
+    # Versions registered before wf_autoe2e point at raw checkpoint files and
+    # may carry the same tag; only LoggedModel-backed versions count here.
+    found = [
+        version
+        for version in client.search_model_versions(
+            f"name = '{REGISTERED_MODEL}' and tags.checkpoint_sha256 = '{sha}'"
+        )
+        if str(version.source).startswith("models:/m-")
+    ]
     if len(found) > 1:
         raise RuntimeError(f"{len(found)} versions claim checkpoint {sha}")
     source = f"models:/{model.model_id}"
