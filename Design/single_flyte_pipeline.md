@@ -49,7 +49,7 @@ run on it is on its run.
 |---|---|---|
 | Entry points | `wf_acquire_raw_snapshot` and `wf_autoe2e` only | One interface to learn. Acquisition has a different lifecycle and is the only code that holds the HF token |
 | Upstream access | `wf_autoe2e` tasks never receive the `hf-token` secret | Processing never depends on the Hub, and the guarantee is structural |
-| Raw format | Uncompressed tar per unit plus a Parquet member index | nuPlan archives already are uncompressed tar. Range reads of one member need only a key, an offset, and a length |
+| Raw format | Uncompressed tar per unit plus a canonical JSON Lines member index | nuPlan archives already are uncompressed tar. Range reads of one member need only a key, an offset, and a length |
 | Pack format | WebDataset shards, as today | Training streams samples sequentially |
 | Datasets | KITScenes, nuPlan, L2D behind one adapter interface. NVIDIA PhysicalAI is deleted | The workflow never branches on the dataset. NVIDIA has no fan-out planner and no Reactive stage |
 | Datasets per execution | Exactly one training dataset | Keeps lineage unambiguous. Evaluation datasets are separate inputs |
@@ -89,7 +89,7 @@ class DatasetSpec:                   # every field enters dataset_id
     dataset: AutoE2EDataset          # KITSCENES, NUPLAN, L2D
     source_manifest: ManifestRef     # raw snapshot manifest: URI + VersionId + SHA-256
     unit_limit: int                  # 0 = all units; N = first N in manifest order
-    pack_version: str                # code constant
+    pack_version: str                # must equal current_pack_version(dataset), derived from the contract constants
     image_size: int
     pack_params: Dict[str, str]      # adapter-validated, e.g. nuPlan scenario budget
     reasoning: Optional[ReasoningSpec]  # teacher, prompt_version, label_stride
@@ -131,7 +131,7 @@ pins it. Dataset-specific behavior lives behind the adapter for
 ```
 s3://<datasets_bucket>/<dataset>/raw-snapshots/<upstream_revision>/<snapshot_id>/
   units/<unit_id>.tar      # uncompressed tar, upstream files byte for byte
-  index/<unit_id>.parquet  # one row per member
+  index/<unit_id>.jsonl    # one canonical JSON line per member
   manifest.json            # written last, write-once
 ```
 
@@ -168,12 +168,22 @@ unit, and its identity excludes everything about the pack:
 
 | Identity fields | Not included |
 |---|---|
-| dataset, upstream revision, unit id, teacher, `prompt_version`, `label_stride`, `REASONING_LABEL_POLICY_VERSION`, `UID_SCHEMA_VERSION` | parser, shard, and geometry versions |
+| dataset, upstream revision, unit id, teacher, teacher model, `prompt_version`, `label_stride`, `REASONING_LABEL_POLICY_VERSION`, `UID_SCHEMA_VERSION` | parser, shard, and geometry versions |
 
-Label files live under `<dataset>/labels/<label_id>/`, with a write-once
-record at `<dataset>/_stages/labels/<label_id>.json` holding a digest over
-every file's relative key, size, and ETag. A build verifies the digest before
-use and fails on a mismatch instead of re-labeling.
+Labelling one unit is a three-step commit:
+
+1. a write-once claim `<dataset>/_stages/labels/<label_id>.claim` names the
+   one Flyte execution allowed to call the teacher; another execution fails
+   instead of paying twice, and a retry of the same execution proceeds;
+2. that execution writes the files under a fresh attempt prefix
+   `<dataset>/labels/<label_id>/<attempt_id>/`, so nothing is overwritten;
+3. the write-once record `<dataset>/_stages/labels/<label_id>.json` commits
+   one attempt with a digest over every file's relative key, size, and ETag.
+
+A build verifies that digest before use and fails on a mismatch instead of
+re-labeling. The label identity names the teacher model
+(`ReasoningSpec.teacher_model`); the task refuses to label when the endpoint
+serves another model.
 
 A parser change can change which frames exist, but it does not re-label. The
 pack JOIN treats a sample without a label as fully masked, and the
@@ -189,9 +199,15 @@ label `meta.json` against the label identity.
 Publications keep the `<dataset>/vN.M/` layout that the Console reads. After
 the manifest gate, the build writes two write-once objects:
 
-- `<dataset>/by-id/<dataset_id>.json`: the canonical spec, version, and
+- `<published>/vN.M/partitions/<partition_id>/`: a byte-identical copy of
+  each packed partition, which is what Ray Train reads, and
+  `<published>/vN.M/partitions/manifest.json`, the views manifest that lists
+  every partition manifest digest. This is the reuse gate for every dataset.
+  KITScenes additionally gets the Console's flat `shards/` publication, whose
+  manifest digest is recorded in the lineage;
+- `<published>/by-id/<dataset_id>.json`: the canonical spec, version, and
   manifest key and SHA-256;
-- `<dataset>/vN.M/lineage/dataset.json` and `units.parquet`: the dataset
+- `<dataset>/vN.M/lineage/dataset.json` and `units.jsonl`: the dataset
   lineage record (6.1), naming the raw snapshot, every label record, and the
   pack code.
 
@@ -247,7 +263,8 @@ Known gaps:
 | 4 | Train with Ray Train | `epochs == 0` |
 | 5 | Evaluate every suite on every distinct checkpoint | — |
 | 6 | Register one model version per new distinct checkpoint | `epochs == 0` |
-| 7 | Precompute Console overlays for `best` | `OVLSET` is ready for the same checkpoint and dataset |
+| 7 | Verify lineage: `verify_lineage` recomputes every digest of the new models | — |
+| 8 | Precompute Console overlays for `best` (not implemented yet: the overlay inference path loads only the IL checkpoint format) | — |
 
 `train_ray` is one task factory. `gpu_profile` picks the `RayJobConfig`,
 Kueue queue, priority class, and node selector from a single table. The task
@@ -285,7 +302,7 @@ evaluation dataset ──input──► evaluation run ──metrics────
 | LoggedModel, one per distinct checkpoint | stage 6 with `initialize_logged_model(source_run_id=training run)` | params (6.0), description (6.0), metrics, and artifacts: the checkpoint, its checkpoint lineage, the dataset lineage copies, and its evaluation records |
 | Metrics | `log_metric(model_id=…, dataset=…)` | every evaluation metric, attached to the LoggedModel and the MLflow Dataset it was measured on |
 | Model version | `create_model_version(source="models:/<model_id>", run_id=…)` | a pointer to the LoggedModel, plus the identity tags for registry search |
-| MLflow Dataset | `log_input` with `AutoE2EDataset` (6.0) | name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, and a profile with the lineage summary |
+| MLflow Dataset | `log_input` with an `mlflow.entities.Dataset` (6.0) | name `<published name>/<version>`, digest `dataset_id`, source the by-id index URI, and a profile with the lineage summary |
 
 Because metrics carry the dataset, the same metric name measured on two
 evaluation datasets stays two results, and an evaluation added a month later
@@ -305,7 +322,7 @@ then removed them. It settled three placement choices:
 |---|---|
 | The LoggedModel page shows metrics with their dataset and source run, params, runs, datasets used, model versions, and artifacts, but not tags | Every lineage digest is a param: `checkpoint_sha256`, `checkpoint_role`, `lineage_sha256`, `dataset_id`, `dataset_lineage_sha256`, `parent_model_id`, `stage_index`, image digests, and git commit, next to the flattened `DatasetSpec` and `TrainingSpec`. Params are write-once, which fits immutable identity. The description is generated Markdown that links the parent model page, the published dataset, and the evaluation records |
 | The OSS registry has no `model_id` column; a version links to a LoggedModel only through `source="models:/<model_id>"` | Versions are created with that source and the training run id. The same identity values are also set as version tags, because the registry list filters on tags and not on LoggedModel params |
-| `MetaDataset` does not serialize a profile | `AutoE2EDataset` subclasses `MetaDataset` and adds `profile` to `to_dict()` as JSON: `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and sample and shard totals |
+| `MetaDataset` does not serialize a profile, and the skinny client has no `mlflow.data` | The pipeline builds `mlflow.entities.Dataset` directly with a JSON profile: `dataset_lineage_sha256`, `snapshot_manifest_sha256`, `label_set_sha256`, pack contracts, and sample and shard totals |
 
 Cleanup of a probe must delete objects by id. `mlflow gc` without
 `--run-ids` permanently deletes every run in the deleted lifecycle stage of
@@ -323,13 +340,13 @@ downstream.
 
 | Record | Written by | Location | One per |
 |---|---|---|---|
-| dataset lineage | stage 2, after the shards and before the by-id index | `<dataset>/vN.M/lineage/dataset.json` and `units.parquet` | published dataset |
+| dataset lineage | stage 2, after the shards and before the by-id index | `<dataset>/vN.M/lineage/dataset.json` and `units.jsonl` | published dataset |
 | checkpoint lineage | stage 6, or stage 5 for an imported checkpoint | LoggedModel artifact `lineage/checkpoint.json` | distinct checkpoint |
 | evaluation record | stage 5 | LoggedModel artifact `evaluations/<suite>/<dataset_id>.json` | checkpoint, suite, and evaluation dataset |
 
 A dataset lineage is shared by every checkpoint trained on that dataset, so
 its canonical copy lives with the publication in S3. Every LoggedModel also
-stores byte-identical copies of `dataset.json` and `units.parquet` for its
+stores byte-identical copies of `dataset.json` and `units.jsonl` for its
 training dataset and for each dataset it was evaluated on, under
 `lineage/datasets/<dataset_id>/`. The copies are checked against the
 recorded SHA-256, so the hash chain holds, and the model page alone is
@@ -340,7 +357,7 @@ records, and no earlier record is rewritten.
 
 #### Dataset lineage (`autoe2e_dataset_lineage_v1`)
 
-`units.parquet` has one row per unit used:
+`units.jsonl` has one row per unit used:
 
 | Column | Meaning |
 |---|---|
@@ -357,11 +374,11 @@ records, and no earlier record is rewritten.
 {
   "schema_version": "autoe2e_dataset_lineage_v1",
   "dataset_id": "…",
-  "spec": {"dataset": "kitscenes", "source_manifest": {"uri": "s3://…/manifest.json", "version_id": "…", "sha256": "…"}, "unit_limit": 0, "pack_version": "…", "image_size": 256, "pack_params": {}, "reasoning": {"teacher": "openai_compatible", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}},
+  "spec": {"dataset": "kitscenes", "source_manifest": {"uri": "s3://…/manifest.json", "version_id": "…", "sha256": "…"}, "unit_limit": 0, "pack_version": "…", "image_size": 256, "pack_params": {}, "reasoning": {"teacher": "openai_compatible", "teacher_model": "nvidia/Cosmos3-Nano", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}},
   "published": {"name": "kitscenes", "version": "v3.6", "manifest_key": "kitscenes/v3.6/shards/manifest.json", "manifest_sha256": "…"},
   "raw": {"upstream": "KIT-MRT/KITScenes-Multimodal", "revision": "6fde0034…", "snapshot_manifest_sha256": "…", "units": 533},
   "labels": {"label_policy_version": "v2", "uid_schema_version": "v1", "label_set_sha256": "…", "reused": 533, "created": 0},
-  "units": {"uri": "s3://…/kitscenes/v3.6/lineage/units.parquet", "sha256": "…", "rows": 533},
+  "units": {"uri": "s3://…/kitscenes/v3.6/lineage/units.jsonl", "sha256": "…", "rows": 533},
   "pack": {"contracts": {"uid": "v1", "parser": "v3", "shard": "v13", "geometry": "v7"}, "image_digest": "sha256:…", "git_commit": "…", "task": "data_processing"},
   "build": {"flyte_execution_id": "…", "finished_at": "2026-10-21T03:12:00Z"},
   "totals": {"samples": 42667, "shards": 404, "reasoning_labels": 4598}
@@ -418,7 +435,7 @@ one.
 #### Verification
 
 `verify_lineage(model_version)` walks the chain and recomputes every digest:
-the LoggedModel's checkpoint lineage, the dataset lineage and `units.parquet` in
+the LoggedModel's checkpoint lineage, the dataset lineage and `units.jsonl` in
 S3, the raw snapshot manifest, the label records, each evaluation record,
 and then the parent's chain recursively. It fails on the first mismatch. The
 smoke launch plan runs it after registration, so a pipeline change that
@@ -431,8 +448,8 @@ All answers start from the model version page and stay inside MLflow.
 | Question | On the model page |
 |---|---|
 | Which data trained this checkpoint? | the training dataset input and its profile; `lineage/datasets/<dataset_id>/dataset.json` |
-| Which raw bytes and upstream revision? | dataset lineage `raw`, and `units.parquet` tar digests per unit |
-| Which labels, from which teacher and prompt? | dataset lineage `spec.reasoning` and `labels`; `units.parquet` names every label record |
+| Which raw bytes and upstream revision? | dataset lineage `raw`, and `units.jsonl` tar digests per unit |
+| Which labels, from which teacher and prompt? | dataset lineage `spec.reasoning` and `labels`; `units.jsonl` names every label record |
 | Which code packed and trained it? | dataset lineage `pack`; LoggedModel params for the training image and commit |
 | What was it initialized from? | `parent_model_id`, which links to the parent's model page, recursively |
 | Every evaluation ever run on it, and on which data? | the LoggedModel metrics, each tied to its evaluation dataset, and `evaluations/` |
