@@ -775,6 +775,9 @@ def overlay_metadata(*, model: RegisteredModel, run_id: str, dataset_source: str
     from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
 
     metrics = numeric_leaves("", json.loads(metrics_json))
+    if "validation_ade_6p4s_m" not in metrics or "validation_fde_6p4s_m" not in metrics:
+        # A 0.0 ADE would be written immutably next to every overlay pointer.
+        raise ValueError("overlays need the Ray validation ADE/FDE of a trajectory model")
     return {
         "registered_model_name": REGISTERED_MODEL,
         "model_version": str(int(model.version)),
@@ -784,8 +787,8 @@ def overlay_metadata(*, model: RegisteredModel, run_id: str, dataset_source: str
         "checkpoint_sha256": model.checkpoint_sha256,
         "model_name": training.backbone,
         # Ray validation reports the full 6.4 s horizon.
-        "eval_ade": metrics.get("ade_6p4s_m"),
-        "eval_fde": metrics.get("fde_6p4s_m"),
+        "eval_ade": metrics["validation_ade_6p4s_m"],
+        "eval_fde": metrics["validation_fde_6p4s_m"],
         "dataset_source": dataset_source,
         "dataset_version_source": dataset_version,
         "train_execution_id": execution_id,
@@ -804,7 +807,7 @@ def resolve_overlay_checkpoint(
     import tempfile
     from pathlib import Path
 
-    import torch
+    from training.dataset_policy import KITSCENES_DATASET_NAME
 
     from Platform.pipelines.inference import sha256_file
 
@@ -814,11 +817,10 @@ def resolve_overlay_checkpoint(
     _s3().download_file(bucket, key, str(path))
     if sha256_file(path) != model.checkpoint_sha256:
         raise RuntimeError(f"{model.checkpoint_uri} differs from its registered sha256")
-    config = torch.load(path, map_location="cpu", weights_only=False)["config"]
     metadata = overlay_metadata(
         model=model, run_id=trained.run_id,
-        # Precompute checks this against the checkpoint's own training policy.
-        dataset_source=str(config["trajectory_training_policy"]["dataset_name"]),
+        # Precompute rejects a checkpoint whose training policy names another dataset.
+        dataset_source=KITSCENES_DATASET_NAME,
         dataset_version=dataset.version, training=training,
         metrics_json=trained.best_metrics_json, execution_id=_execution_id(),
     )
@@ -880,8 +882,9 @@ def publish_overlays(
     result = precompute_overlay_partition(
         checkpoint=resolved.checkpoint, model_metadata=resolved.metadata, prepare_gate=gate,
         shard_dirs=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
-        # BEVFormer T8 fits the benchmark evaluator's batch of 4 on one L4.
-        batch_size=4, num_workers=2, **common, **contract,
+        # The benchmark evaluator's batch; in-process decoding keeps T8 camera
+        # history within the 16Gi host limit, which OOM halving cannot catch.
+        batch_size=4, num_workers=0, **common, **contract,
     )
     finalize_overlay_set(model_metadata=resolved.metadata, partition_results=[result], prepare_gate=gate, **common)
 
