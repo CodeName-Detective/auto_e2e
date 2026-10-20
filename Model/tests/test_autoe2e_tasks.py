@@ -14,16 +14,16 @@ from Platform.pipelines.autoe2e_dataset import (
     ReasoningSpec,
     compute_dataset_id,
 )
-from Platform.pipelines.autoe2e_stages import (
+from Platform.pipelines.autoe2e_labels import (
     LabelIdentity,
-    SceneStage,
+    label_id,
     label_identity,
-    raw_identity,
+    label_prefix,
 )
 from Platform.pipelines.autoe2e_tasks import (
     DatasetHandle,
-    lookup_scene_stage,
-    record_scene_stage,
+    lookup_label_set,
+    record_label_set,
     resolve_published_dataset,
     write_dataset_index,
 )
@@ -274,84 +274,59 @@ def test_task_interface_types_round_trip_through_flyte(value, python_type):
     assert TypeEngine.to_python_value(ctx, literal, python_type) == value
 
 
-def _raw_artifact(s3: _S3, prefix: str = "sv/run/abc") -> str:
-    s3.put(f"{prefix}/data/train/scene-a/x.mcap", b"frames")
-    s3.put(f"{prefix}/data/sequence_archives.csv", b"csv")
-    return f"s3://{BUCKET}/{prefix}"
+LABELS = LabelIdentity("openai_compatible", "p", 10, "v2", "v1")
 
 
-def test_unrecorded_scene_stage_is_absent():
-    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
-    assert lookup_scene_stage(
-        _S3(),
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.RAW,
-        identity=identity,
+def _store_labels(s3: _S3, identity: dict) -> None:
+    prefix = label_prefix(AutoE2EDataset.KITSCENES, label_id(identity))
+    s3.put(f"{prefix}/records.jsonl", b'{"uid": "a"}\n')
+    s3.put(f"{prefix}/meta.json", b"{}")
+
+
+def _identity():
+    return label_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a", LABELS)
+
+
+def test_unrecorded_label_set_is_absent():
+    assert lookup_label_set(
+        _S3(), bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity()
     ) is None
 
 
-def test_recorded_scene_stage_is_reused():
+def test_recorded_label_set_is_reused():
     s3 = _S3()
-    uri = _raw_artifact(s3)
-    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
-    key = record_scene_stage(
-        s3,
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.RAW,
-        identity=identity,
-        artifact_uri=uri + "/",
+    _store_labels(s3, _identity())
+    written = record_label_set(
+        s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity(), label_count=1
     )
-    assert key.startswith("kitscenes/_stages/raw/")
-    assert lookup_scene_stage(
-        s3,
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.RAW,
-        identity=identity,
-    ) == uri
+    found = lookup_label_set(
+        s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity()
+    )
+    assert found == written
+    assert found["artifact_uri"].startswith(f"s3://{BUCKET}/kitscenes/labels/")
 
 
-def test_changed_scene_artifact_fails_instead_of_rebuilding():
+def test_changed_label_files_fail_instead_of_relabeling():
     s3 = _S3()
-    uri = _raw_artifact(s3)
-    identity = raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a")
-    record_scene_stage(
-        s3,
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.RAW,
-        identity=identity,
-        artifact_uri=uri,
+    _store_labels(s3, _identity())
+    record_label_set(
+        s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity(), label_count=1
     )
-    del s3.objects[(BUCKET, "sv/run/abc/data/sequence_archives.csv")]
+    prefix = label_prefix(AutoE2EDataset.KITSCENES, label_id(_identity()))
+    s3.objects[(BUCKET, f"{prefix}/records.jsonl")] = b"tampered"
     with pytest.raises(ValueError, match="changed"):
-        lookup_scene_stage(
-            s3,
-            bucket=BUCKET,
-            dataset=AutoE2EDataset.KITSCENES,
-            stage=SceneStage.RAW,
-            identity=identity,
+        lookup_label_set(
+            s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity()
         )
 
 
-def test_label_record_is_separate_from_raw_record():
+def test_label_record_is_write_once():
     s3 = _S3()
-    uri = _raw_artifact(s3)
-    labels = LabelIdentity("openai_compatible", "p", 10, "v2", "v1")
-    record_scene_stage(
-        s3,
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.RAW,
-        identity=raw_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a"),
-        artifact_uri=uri,
+    _store_labels(s3, _identity())
+    record_label_set(
+        s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity(), label_count=1
     )
-    assert lookup_scene_stage(
-        s3,
-        bucket=BUCKET,
-        dataset=AutoE2EDataset.KITSCENES,
-        stage=SceneStage.LABELS,
-        identity=label_identity(AutoE2EDataset.KITSCENES, "rev", "scene-a", labels),
-    ) is None
+    with pytest.raises(RuntimeError, match="different content"):
+        record_label_set(
+            s3, bucket=BUCKET, dataset=AutoE2EDataset.KITSCENES, identity=_identity(), label_count=2
+        )
