@@ -30,36 +30,18 @@ IDENTITY_KEYS = (
 _MAX_PARAM_VALUE = 6000
 
 
-def _mlflow_dataset_class():
-    from mlflow.data.meta_dataset import MetaDataset
-
-    class AutoE2EMlflowDataset(MetaDataset):
-        """MetaDataset that also persists a profile (MetaDataset drops it)."""
-
-        def __init__(self, *, profile: Mapping[str, Any], **kwargs):
-            super().__init__(**kwargs)
-            self._autoe2e_profile = dict(profile)
-
-        @property
-        def profile(self):
-            return self._autoe2e_profile
-
-        def to_dict(self):
-            config = super().to_dict()
-            config["profile"] = json.dumps(self._autoe2e_profile, sort_keys=True)
-            return config
-
-    return AutoE2EMlflowDataset
-
-
 def mlflow_dataset(
     *,
     dataset_lineage: Mapping[str, Any],
     dataset_lineage_sha256: str,
     index_uri: str,
 ):
-    """MLflow Dataset for a published dataset, identified by ``dataset_id``."""
-    from mlflow.data.http_dataset_source import HTTPDatasetSource
+    """MLflow Dataset entity for a published dataset, identified by ``dataset_id``.
+
+    Built as an entity rather than through ``mlflow.data`` because the
+    skinny client has no ``mlflow.data`` and ``MetaDataset`` drops profiles.
+    """
+    from mlflow.entities import Dataset
 
     published = dataset_lineage["published"]
     labels = dataset_lineage.get("labels") or {}
@@ -71,11 +53,22 @@ def mlflow_dataset(
         "samples": dataset_lineage["totals"]["samples"],
         "units": dataset_lineage["units"]["rows"],
     }
-    return _mlflow_dataset_class()(
-        source=HTTPDatasetSource(index_uri),
+    return Dataset(
         name=f"{published['name']}/{published['version']}",
         digest=dataset_lineage["dataset_id"],
-        profile=profile,
+        source_type="http",
+        source=json.dumps({"url": index_uri}),
+        profile=json.dumps(profile, sort_keys=True),
+    )
+
+
+def log_dataset_input(client, *, run_id: str, dataset, context: str, model_id: Optional[str] = None) -> None:
+    from mlflow.entities import DatasetInput, InputTag, LoggedModelInput
+
+    client.log_inputs(
+        run_id,
+        datasets=[DatasetInput(dataset, [InputTag("mlflow.data.context", context)])],
+        models=[LoggedModelInput(model_id)] if model_id else None,
     )
 
 
@@ -219,14 +212,11 @@ def log_evaluation(
     record_name: str,
 ) -> None:
     """Attach evaluation metrics to the LoggedModel and keep the record with it."""
-    from mlflow.entities import DatasetInput, InputTag, LoggedModelInput, Metric
     import time
 
-    client.log_inputs(
-        run_id,
-        datasets=[DatasetInput(dataset._to_mlflow_entity(), [InputTag("mlflow.data.context", context)])],
-        models=[LoggedModelInput(model_id)],
-    )
+    from mlflow.entities import Metric
+
+    log_dataset_input(client, run_id=run_id, dataset=dataset, context=context, model_id=model_id)
     timestamp = int(time.time() * 1000)
     client.log_batch(run_id, metrics=[
         Metric(
