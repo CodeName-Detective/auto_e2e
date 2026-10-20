@@ -1212,7 +1212,7 @@ def _acquire_nuplan_raw_snapshot(
         ephemeral_storage="500Gi",
     ),
     cache=True,
-    cache_version="nuplan-snapshot-pack-v13-manifest-v10",
+    cache_version="nuplan-snapshot-pack-v13-manifest-v11",
     retries=1,
 )
 def pack_nuplan_snapshot_reactive_dataset(
@@ -1295,6 +1295,14 @@ def pack_nuplan_snapshot_reactive_dataset(
             materialized.sensor_log_names
         ),
     })
+    # Ray's dataset plan requires a unique partition_id per source; a sensor
+    # group pack is identified by the archives it was packed from.
+    packed.setdefault(
+        "partition_id",
+        "nuplan-" + hashlib.sha256(
+            canonical_json_bytes(sorted(packed["raw_archive_ids"]))
+        ).hexdigest()[:16],
+    )
     temporary_manifest = output / ".manifest.json.tmp"
     temporary_manifest.write_bytes(canonical_json_bytes(packed))
     temporary_manifest.replace(output / "manifest.json")
