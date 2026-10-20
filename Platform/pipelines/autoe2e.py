@@ -584,11 +584,29 @@ def _log(client, s3, runtime, *, run_id, model: RegisteredModel, dataset: Datase
         index_uri=f"s3://{runtime.datasets_bucket}/{dataset.published_name}/by-id/{dataset.dataset_id}.json",
     )
     suite_name = f"{suite}@{dataset.published_name}-{dataset.version}"
+    _attach_dataset_lineage(client, s3, runtime, model.model_id, dataset, lineage)
     am.log_evaluation(
         client, run_id=run_id, model_id=model.model_id, dataset=mlflow_dataset,
         context=f"eval:{suite}", metrics=metrics, suite=suite_name,
         record_payload=record_bytes(record), record_name=f"{dataset.dataset_id}.json",
     )
+
+
+def _attach_dataset_lineage(client, s3, runtime, model_id: str, dataset: DatasetHandle, lineage: dict) -> None:
+    """Keep a byte-identical copy of an evaluation dataset's lineage on the model."""
+    import tempfile
+    from pathlib import Path
+
+    from Platform.pipelines.autoe2e_lineage import record_bytes
+
+    units_key = lineage["units"]["uri"].removeprefix(f"s3://{runtime.datasets_bucket}/")
+    units_payload = s3.get_object(Bucket=runtime.datasets_bucket, Key=units_key)["Body"].read()
+    with tempfile.TemporaryDirectory() as root:
+        base = Path(root, "lineage", "datasets", dataset.dataset_id)
+        base.mkdir(parents=True)
+        (base / "dataset.json").write_bytes(record_bytes(lineage))
+        (base / "units.jsonl").write_bytes(units_payload)
+        client.log_model_artifacts(model_id, root)
 
 
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
@@ -680,8 +698,17 @@ def evaluate(
             evaluate_kitscenes_benchmark(models=models, dataset=next(datasets), runtime=runtime)
 
 
-@task(container_image=TRAINING_IMAGE, requests=Resources(cpu="1", mem="1Gi"))
-def pipeline_result(dataset: DatasetHandle, models: List[RegisteredModel]) -> PipelineResult:
+@task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
+def verify_models(dataset: DatasetHandle, models: List[RegisteredModel]) -> PipelineResult:
+    """Recompute every lineage digest of the registered models before returning."""
+    from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
+    from Platform.pipelines.autoe2e_verify import verify_lineage
+
+    client = _client()
+    s3 = _s3()
+    for model in models:
+        summary = verify_lineage(client, s3, f"{REGISTERED_MODEL}/{model.version}")
+        print(json.dumps(summary, sort_keys=True))
     return PipelineResult(dataset.dataset_id, dataset.lineage_sha256, models)
 
 
@@ -708,6 +735,6 @@ def wf_autoe2e(
         models=models, evaluation=evaluation, evaluation_datasets=evaluation_datasets,
         trained=trained, dataset=published, runtime=runtime,
     )
-    result = pipeline_result(dataset=published, models=models)
+    result = verify_models(dataset=published, models=models)
     done >> result
     return result
