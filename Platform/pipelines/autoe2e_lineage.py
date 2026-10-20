@@ -134,7 +134,8 @@ def dataset_lineage(
     payload = units_jsonl(units)
     _sha(views["sha256"], "views sha256")
     partition_ids = set(views["partition_ids"])
-    if not {u.partition_id for u in units} <= partition_ids:
+    # nuPlan archives feed several sensor-group partitions; they say "*".
+    if not {u.partition_id for u in units if u.partition_id != "*"} <= partition_ids:
         raise ValueError("units reference partitions that are not published")
     if console is not None:
         _sha(console["manifest_sha256"], "console manifest_sha256")
