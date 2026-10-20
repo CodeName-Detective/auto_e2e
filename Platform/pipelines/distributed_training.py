@@ -65,7 +65,12 @@ MLFLOW_URI = os.environ.get(
     "MLFLOW_TRACKING_URI",
     "http://mlflow.mlflow.svc.cluster.local:5000",
 )
-REACTIVE_MLFLOW_EXPERIMENT = "reactive-training"
+# wf_autoe2e sets AUTO_E2E_MLFLOW_EXPERIMENT=auto-e2e so every run of the single
+# pipeline lands in one experiment.
+REACTIVE_MLFLOW_EXPERIMENT = os.environ.get(
+    "AUTO_E2E_MLFLOW_EXPERIMENT",
+    "reactive-training",
+)
 REACTIVE_BEV_EVALUATION_MLFLOW_EXPERIMENT = (
     "reactive-bev-evaluation"
 )
