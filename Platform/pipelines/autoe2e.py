@@ -108,8 +108,8 @@ class ModelRef:
 
     model_version: str = ""
     checkpoint_uri: str = ""
-    # For a bare checkpoint only: its training epoch, which Reactive stage
-    # contracts check (KITScenes fine-tuning requires the epoch-5 nuPlan parent).
+    # For a bare checkpoint only: the epoch the caller expects. It is checked
+    # against the epoch stored in the checkpoint, which is what gets recorded.
     checkpoint_epoch: int = 0
 
 
@@ -235,7 +235,31 @@ def checkpoint_sha256(s3, uri: str) -> str:
     return digest.hexdigest()
 
 
-@task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
+def stored_epoch(uri: str) -> int:
+    """Epoch recorded inside a Reactive checkpoint (never a caller's claim)."""
+    import tempfile
+
+    import torch
+
+    from Platform.pipelines.dataset_publication_tasks import _split_s3_uri
+
+    bucket, key = _split_s3_uri(uri)
+    with tempfile.NamedTemporaryFile(suffix=".pt") as handle:
+        _s3().download_file(bucket, key, handle.name)
+        payload = torch.load(handle.name, map_location="cpu", weights_only=False)
+    epoch = payload.get("epoch")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        raise ValueError(f"checkpoint {uri} records no valid epoch")
+    return epoch
+
+
+@task(
+    container_image=TRAINING_IMAGE,
+    requests=Resources(cpu="2", mem="16Gi", ephemeral_storage="20Gi"),
+    limits=Resources(cpu="2", mem="16Gi", ephemeral_storage="20Gi"),
+    environment=EXPERIMENT_ENV,
+    retries=2,
+)
 def resolve_parent(parent: Optional[ModelRef]) -> ParentHandle:
     """Pin the parent checkpoint by digest, from a registry version or a bare URI."""
     from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
@@ -246,10 +270,13 @@ def resolve_parent(parent: Optional[ModelRef]) -> ParentHandle:
         raise ValueError("ModelRef sets both model_version and checkpoint_uri")
     s3 = _s3()
     if parent.checkpoint_uri:
+        epoch = stored_epoch(parent.checkpoint_uri)
+        if parent.checkpoint_epoch and parent.checkpoint_epoch != epoch:
+            raise ValueError(f"checkpoint stores epoch {epoch}, not {parent.checkpoint_epoch}")
         return ParentHandle(
             present=True, checkpoint_uri=parent.checkpoint_uri,
             checkpoint_sha256=checkpoint_sha256(s3, parent.checkpoint_uri),
-            epoch=parent.checkpoint_epoch,
+            epoch=epoch,
         )
     name, _, version = parent.model_version.rpartition("/")
     if name != REGISTERED_MODEL or not version:
@@ -609,8 +636,10 @@ def _log(client, s3, runtime, *, run_id, model: RegisteredModel, dataset: Datase
     am.log_evaluation(
         client, run_id=run_id, model_id=model.model_id, dataset=mlflow_dataset,
         context=f"eval:{suite}", metrics=metrics, suite=suite_name,
-        # Execution-scoped name: a re-evaluation adds a record, never replaces one.
-        record_payload=record_bytes(record), record_name=f"{dataset.dataset_id}-{_execution_id()}.json",
+        # Attempt-scoped name: a re-evaluation or a retry adds a record, never
+        # replaces one.
+        record_payload=record_bytes(record),
+        record_name=f"{dataset.dataset_id}-{_execution_id()}-{os.environ.get('FLYTE_ATTEMPT_NUMBER', '0')}.json",
     )
 
 
@@ -727,13 +756,20 @@ def evaluate(
 
 
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
-def verify_models(dataset: DatasetHandle, models: List[RegisteredModel]) -> PipelineResult:
+def verify_models(dataset: DatasetHandle, models: List[RegisteredModel], runtime: RuntimeOptions) -> PipelineResult:
     """Recompute every lineage digest of the registered models before returning."""
     from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
     from Platform.pipelines.autoe2e_verify import verify_lineage
 
+    from Platform.pipelines.autoe2e_verify import verify_published_dataset
+
     client = _client()
     s3 = _s3()
+    # The training dataset is verified even when no model was trained on it.
+    print(json.dumps(verify_published_dataset(
+        s3, lineage_uri=f"s3://{runtime.datasets_bucket}/{dataset.lineage_key}",
+        lineage_sha256=dataset.lineage_sha256,
+    ), sort_keys=True))
     for model in models:
         summary = verify_lineage(client, s3, f"{REGISTERED_MODEL}/{model.version}")
         print(json.dumps(summary, sort_keys=True))
@@ -763,6 +799,6 @@ def wf_autoe2e(
         models=models, evaluation=evaluation, evaluation_datasets=evaluation_datasets,
         trained=trained, dataset=published, runtime=runtime,
     )
-    result = verify_models(dataset=published, models=models)
+    result = verify_models(dataset=published, models=models, runtime=runtime)
     done >> result
     return result
