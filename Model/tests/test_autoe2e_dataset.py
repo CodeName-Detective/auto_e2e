@@ -16,11 +16,12 @@ from Platform.pipelines.autoe2e_dataset import (
     dataset_index_key,
     dataset_index_record,
     next_dataset_version,
+    partition_view_prefix,
     validate_dataset_index_record,
-    validate_publication,
+    validate_views,
+    views_manifest,
 )
 from Platform.pipelines.dataset_publication import (
-    PUBLICATION_SCHEMA,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -38,6 +39,7 @@ def _spec(**overrides) -> DatasetSpec:
         image_size=256,
         reasoning=ReasoningSpec(
             teacher="openai_compatible",
+            teacher_model="nvidia/Cosmos3-Nano",
             prompt_version="action_relevant_reasoning_v3_temporal_front256",
             label_stride=10,
         ),
@@ -46,24 +48,22 @@ def _spec(**overrides) -> DatasetSpec:
     return DatasetSpec(**values)
 
 
-def _published(spec: DatasetSpec, version: str = "v3.4"):
-    manifest = {
-        "status": "ready",
-        "dataset": spec.dataset.value,
-        "version": version,
-        "shard_count": 1,
-        "shard_entries": [{"name": "a.tar", "key": "k", "byte_size": 1}],
-    }
-    payload = canonical_json_bytes(manifest, pretty=True)
-    digest = sha256_bytes(payload)
-    record = dataset_index_record(
-        spec,
-        version=version,
-        manifest_key=f"kitscenes/{version}/shards/manifest.json",
-        manifest_sha256=digest,
+CONTRACTS = {"parser_version": "v3", "shard_schema_version": "v13"}
+
+
+def _published(spec: DatasetSpec, version: str = "v3.4", contracts=CONTRACTS):
+    views = views_manifest(
+        dataset_id=compute_dataset_id(spec), published_name="kitscenes", version=version,
+        contracts=contracts, image_size=spec.image_size,
+        partitions=[{"partition_id": "p-a", "prefix": partition_view_prefix("kitscenes", version, "p-a"),
+                     "manifest_sha256": "b" * 64, "sample_count": 5}],
     )
-    lock = {"schema_version": PUBLICATION_SCHEMA, "manifest_sha256": digest}
-    return record, lock, payload
+    payload = canonical_json_bytes(views)
+    record = dataset_index_record(
+        spec, published_name="kitscenes", version=version,
+        views_sha256=sha256_bytes(payload), lineage_sha256="c" * 64,
+    )
+    return record, payload
 
 
 def test_dataset_id_is_stable_and_hex():
@@ -110,7 +110,8 @@ def test_pack_params_order_does_not_change_the_id():
         {"source_manifest": ManifestRef(uri="https://x/a.json", version_id="v", sha256="a" * 64)},
         {"source_manifest": ManifestRef(uri="s3://b/a.json", version_id="", sha256="a" * 64)},
         {"source_manifest": ManifestRef(uri="s3://b/a.json", version_id="v", sha256="A" * 64)},
-        {"reasoning": ReasoningSpec(teacher="t", prompt_version="p", label_stride=0)},
+        {"reasoning": ReasoningSpec(teacher="t", teacher_model="m", prompt_version="p", label_stride=0)},
+        {"reasoning": ReasoningSpec(teacher="t", teacher_model="", prompt_version="p", label_stride=1)},
     ],
 )
 def test_invalid_specs_are_rejected(overrides):
@@ -120,11 +121,9 @@ def test_invalid_specs_are_rejected(overrides):
 
 def test_index_key_lives_outside_version_directories():
     dataset_id = compute_dataset_id(_spec())
-    assert dataset_index_key(AutoE2EDataset.KITSCENES, dataset_id) == (
-        f"kitscenes/by-id/{dataset_id}.json"
-    )
+    assert dataset_index_key("kitscenes-val", dataset_id) == f"kitscenes-val/by-id/{dataset_id}.json"
     with pytest.raises(ValueError):
-        dataset_index_key(AutoE2EDataset.KITSCENES, "not-a-digest")
+        dataset_index_key("kitscenes", "not-a-digest")
 
 
 @pytest.mark.parametrize(
@@ -133,67 +132,45 @@ def test_index_key_lives_outside_version_directories():
         ([], "v1.0"),
         (["v3.3", "v2.2", "v3.0"], "v3.4"),
         (["v9", "v10"], "v10.1"),
-        (["by-id", "v2.1", "tmp"], "v2.2"),
+        (["by-id", "v2.1", "tmp", "_stages"], "v2.2"),
     ],
 )
 def test_next_dataset_version(existing, expected):
     assert next_dataset_version(existing) == expected
 
 
-def test_index_record_round_trips():
+def test_index_record_round_trips_and_pins_lineage():
     spec = _spec()
-    record, _, _ = _published(spec)
-    validate_dataset_index_record(json.loads(json.dumps(record)), spec)
+    record, _ = _published(spec)
+    validate_dataset_index_record(json.loads(json.dumps(record)), spec, published_name="kitscenes")
     assert record["dataset_id"] == compute_dataset_id(spec)
+    assert record["lineage_key"] == "kitscenes/v3.4/lineage/dataset.json"
+    assert record["views_key"] == "kitscenes/v3.4/partitions/manifest.json"
 
 
-def test_index_record_rejects_a_different_spec():
-    record, _, _ = _published(_spec())
+def test_index_record_rejects_another_spec_or_published_name():
+    record, _ = _published(_spec())
     with pytest.raises(ValueError, match="spec differs"):
-        validate_dataset_index_record(record, _spec(image_size=512))
+        validate_dataset_index_record(record, _spec(image_size=512), published_name="kitscenes")
+    with pytest.raises(ValueError, match="another published"):
+        validate_dataset_index_record(record, _spec(), published_name="kitscenes-val")
+    with pytest.raises(ValueError, match="unexpected fields"):
+        validate_dataset_index_record({**record, "extra": 1}, _spec(), published_name="kitscenes")
 
 
-def test_index_record_rejects_extra_fields_and_wrong_key():
-    spec = _spec()
-    record, _, _ = _published(spec)
-    with pytest.raises(ValueError):
-        validate_dataset_index_record({**record, "extra": 1}, spec)
-    with pytest.raises(ValueError):
-        dataset_index_record(
-            spec,
-            version="v3.4",
-            manifest_key="kitscenes/v3.3/shards/manifest.json",
-            manifest_sha256="a" * 64,
-        )
+def test_views_validate_against_index_and_running_contracts():
+    record, payload = _published(_spec())
+    views = validate_views(record, views_payload=payload, expected_contracts=CONTRACTS)
+    assert views["samples"] == 5
+    with pytest.raises(ValueError, match="other contracts"):
+        validate_views(record, views_payload=payload, expected_contracts={**CONTRACTS, "parser_version": "v4"})
+    with pytest.raises(ValueError, match="differs from the index"):
+        validate_views(record, views_payload=payload + b" ", expected_contracts=CONTRACTS)
 
 
-def test_publication_validates():
-    record, lock, payload = _published(_spec())
-    manifest = validate_publication(record, lock=lock, manifest_payload=payload)
-    assert manifest["version"] == "v3.4"
-
-
-def test_publication_rejects_tampered_manifest_bytes():
-    record, lock, payload = _published(_spec())
-    with pytest.raises(ValueError, match="lock does not match"):
-        validate_publication(record, lock=lock, manifest_payload=payload + b" ")
-
-
-def test_publication_rejects_lock_from_another_schema():
-    record, lock, payload = _published(_spec())
-    with pytest.raises(ValueError, match="lock schema"):
-        validate_publication(
-            record,
-            lock={**lock, "schema_version": "v1"},
-            manifest_payload=payload,
-        )
-
-
-def test_publication_rejects_index_pointing_at_other_bytes():
-    record, lock, payload = _published(_spec())
-    with pytest.raises(ValueError, match="index does not match"):
-        validate_publication(
-            {**record, "manifest_sha256": "b" * 64},
-            lock=lock,
-            manifest_payload=payload,
+def test_views_reject_partitions_outside_the_publication():
+    with pytest.raises(ValueError, match="outside"):
+        views_manifest(
+            dataset_id="d" * 64, published_name="kitscenes", version="v1.0", contracts={}, image_size=1,
+            partitions=[{"partition_id": "p", "prefix": "elsewhere/p", "manifest_sha256": "b" * 64, "sample_count": 1}],
         )
