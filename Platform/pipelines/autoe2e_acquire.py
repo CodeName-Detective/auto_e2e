@@ -101,20 +101,16 @@ def _sha256_file(path: Path) -> str:
 def tar_tree(root: Path, unit_id: str, out_path: Path) -> list:
     """Tar every file under ``root`` (sorted, relative paths) for one unit."""
     files = sorted(p for p in root.rglob("*") if p.is_file())
-    handles = []
 
     def _iter():
+        # One open file at a time: a scene has up to ~30,000 files, and keeping
+        # them all open exceeded the pod's file descriptor limit.
         for path in files:
-            handle = path.open("rb")
-            handles.append(handle)
-            yield path.relative_to(root).as_posix(), path.stat().st_size, handle
+            with path.open("rb") as handle:
+                yield path.relative_to(root).as_posix(), path.stat().st_size, handle
 
-    try:
-        with out_path.open("wb") as out:
-            write_unit_tar(out, unit_id, _iter())
-    finally:
-        for handle in handles:
-            handle.close()
+    with out_path.open("wb") as out:
+        write_unit_tar(out, unit_id, _iter())
     with out_path.open("rb") as stream:
         return index_tar(stream)
 
