@@ -36,7 +36,12 @@ from Platform.pipelines.distributed_training import (
     _bev_evaluation_pod_template,
 )
 
-EXPERIMENT_ENV = {"AUTO_E2E_MLFLOW_EXPERIMENT": "auto-e2e", "MLFLOW_TRACKING_URI": MLFLOW_URI}
+EXPERIMENT_ENV = {
+    "AUTO_E2E_MLFLOW_EXPERIMENT": "auto-e2e",
+    "MLFLOW_TRACKING_URI": MLFLOW_URI,
+    # Read at registration and baked into the task, so lineage names the code.
+    "AUTO_E2E_GIT_COMMIT": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown"),
+}
 TRAIN_ENVIRONMENT = {**RAY_TASK_ENVIRONMENT, **EXPERIMENT_ENV}
 CAPACITY_BLOCK_NAME = "auto-e2e-p5en-capacity-block"
 
