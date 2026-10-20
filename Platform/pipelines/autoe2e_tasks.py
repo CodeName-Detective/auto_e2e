@@ -18,12 +18,12 @@ from Platform.pipelines.autoe2e_dataset import (
     validate_dataset_index_record,
     validate_publication,
 )
-from Platform.pipelines.autoe2e_stages import (
-    SceneStage,
-    stage_id,
-    stage_record,
-    stage_record_key,
-    validate_stage_record,
+from Platform.pipelines.autoe2e_labels import (
+    label_id,
+    label_prefix,
+    label_record,
+    label_record_key,
+    validate_label_record,
 )
 from Platform.pipelines.dataset_publication import (
     DatasetPublication,
@@ -160,58 +160,55 @@ def _artifact_objects(s3, artifact_uri: str) -> list[dict]:
     return _list_objects(s3, bucket, prefix)
 
 
-def lookup_scene_stage(
+def lookup_label_set(
     s3,
     *,
     bucket: str,
     dataset: AutoE2EDataset,
-    stage: SceneStage,
     identity: dict,
-) -> str | None:
-    """Return the recorded artifact URI for a scene stage, or None.
+) -> dict | None:
+    """Return the verified label record for one unit, or None.
 
-    A record whose artifact listing changed raises instead of returning None,
-    so a damaged artifact is never silently replaced by a new download or a
-    new teacher call.
+    A record whose files changed raises instead of returning None, so damaged
+    labels are never silently replaced by new teacher calls.
     """
-    payload = _get_optional(
-        s3, bucket, stage_record_key(dataset, stage, stage_id(identity))
-    )
+    payload = _get_optional(s3, bucket, label_record_key(dataset, label_id(identity)))
     if payload is None:
         return None
     record = json.loads(payload)
-    validate_stage_record(
+    validate_label_record(
         record,
         identity,
+        bucket=bucket,
         objects=_artifact_objects(s3, record["artifact_uri"]),
     )
-    return record["artifact_uri"]
+    return record
 
 
-def record_scene_stage(
+def record_label_set(
     s3,
     *,
     bucket: str,
     dataset: AutoE2EDataset,
-    stage: SceneStage,
     identity: dict,
-    artifact_uri: str,
-) -> str:
-    """Write the write-once record for an artifact a build just produced."""
-    record = stage_record(
+    label_count: int,
+) -> dict:
+    """Write the write-once record for labels already copied to the store."""
+    digest = label_id(identity)
+    record = label_record(
         identity,
-        artifact_uri=artifact_uri.rstrip("/"),
-        objects=_artifact_objects(s3, artifact_uri),
+        bucket=bucket,
+        objects=_artifact_objects(s3, f"s3://{bucket}/{label_prefix(dataset, digest)}"),
+        label_count=label_count,
     )
-    key = stage_record_key(dataset, stage, record["stage_id"])
     _put_immutable(
         s3,
         bucket=bucket,
-        key=key,
+        key=label_record_key(dataset, digest),
         payload=canonical_json_bytes(record, pretty=True),
         content_type="application/json",
     )
-    return key
+    return record
 
 
 @task(
