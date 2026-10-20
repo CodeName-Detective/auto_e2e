@@ -146,6 +146,15 @@ def units_key(published_name: str, version: str) -> str:
     return f"{dataset_prefix(published_name, version)}/lineage/units.jsonl"
 
 
+def partition_view_prefix(published_name: str, version: str, partition_id: str) -> str:
+    """Per-partition directory that Ray Train reads (manifest.json and shards)."""
+    import re as _re
+
+    if not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", partition_id):
+        raise ValueError(f"invalid partition id {partition_id!r}")
+    return f"{dataset_prefix(published_name, version)}/partitions/{partition_id}"
+
+
 def _version_parts(version: str) -> tuple[int, int]:
     match = _VERSION_PARTS_RE.fullmatch(version)
     if match is None:
