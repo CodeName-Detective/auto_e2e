@@ -25,6 +25,7 @@ REV = "6fde0034446669e2ed7235e4c7fe323cd23d599d"
 UNIT = "008fba36-5e82-e02b-8edf-a55f5271758d"
 LABELS = LabelIdentity(
     teacher="openai_compatible",
+    teacher_model="nvidia/Cosmos3-Nano",
     prompt_version="action_relevant_reasoning_v3_temporal_front256",
     label_stride=10,
     label_policy_version="v2",
@@ -50,6 +51,7 @@ def test_identity_has_no_pack_contract_fields():
     "change",
     [
         {"teacher": "mock"},
+        {"teacher_model": "nvidia/Cosmos3-Super"},
         {"prompt_version": "p2"},
         {"label_stride": 5},
         {"label_policy_version": "v3"},
@@ -93,14 +95,14 @@ def test_listing_digest_rejects_empty_and_duplicates():
 
 
 def test_record_points_into_the_label_store():
-    record = label_record(_identity(), bucket="datasets", objects=OBJECTS, label_count=1)
+    record = label_record(_identity(), bucket="datasets", attempt_id="exec-0", objects=OBJECTS, label_count=1)
     assert record["artifact_uri"] == (
-        f"s3://datasets/kitscenes/labels/{label_id(_identity())}"
+        f"s3://datasets/kitscenes/labels/{label_id(_identity())}/exec-0"
     )
 
 
 def test_record_validates_against_the_same_listing():
-    record = label_record(_identity(), bucket="datasets", objects=OBJECTS, label_count=1)
+    record = label_record(_identity(), bucket="datasets", attempt_id="exec-0", objects=OBJECTS, label_count=1)
     validate_label_record(
         record, _identity(), bucket="datasets", objects=list(reversed(OBJECTS))
     )
@@ -116,13 +118,13 @@ def test_record_validates_against_the_same_listing():
     ],
 )
 def test_record_rejects_changed_files(mutate):
-    record = label_record(_identity(), bucket="datasets", objects=OBJECTS, label_count=1)
+    record = label_record(_identity(), bucket="datasets", attempt_id="exec-0", objects=OBJECTS, label_count=1)
     with pytest.raises(ValueError, match="changed"):
         validate_label_record(record, _identity(), bucket="datasets", objects=mutate(OBJECTS))
 
 
 def test_record_rejects_another_identity_or_bucket():
-    record = label_record(_identity(), bucket="datasets", objects=OBJECTS, label_count=1)
+    record = label_record(_identity(), bucket="datasets", attempt_id="exec-0", objects=OBJECTS, label_count=1)
     with pytest.raises(ValueError, match="identity differs"):
         validate_label_record(record, _identity(teacher="mock"), bucket="datasets", objects=OBJECTS)
     with pytest.raises(ValueError, match="changed"):
@@ -147,5 +149,7 @@ def test_label_meta_from_the_july_full_run_matches():
         "label_policy_version": "v2",
     }
     validate_label_meta(meta, _identity())
+    with pytest.raises(ValueError, match="split"):
+        validate_label_meta({**meta, "split": "val"}, _identity())
     with pytest.raises(ValueError, match="prompt_version"):
         validate_label_meta({**meta, "prompt_version": "other"}, _identity())
