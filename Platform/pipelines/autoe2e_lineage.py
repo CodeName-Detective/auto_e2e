@@ -229,15 +229,26 @@ def evaluation_record(
     dataset: Mapping[str, Any],
     protocol: Mapping[str, Any],
     metrics: Mapping[str, float],
-    per_sample: Mapping[str, Any],
+    per_sample: Optional[Mapping[str, Any]],
     code: Mapping[str, str],
     flyte_execution_id: str,
     finished_at: str,
+    model_reexecuted: bool = True,
 ) -> dict[str, Any]:
+    """Build an evaluation record.
+
+    ``model_reexecuted`` is False only for metrics the training run measured
+    on its own validation split; those carry no per-sample output.
+    """
     _sha(checkpoint_sha256, "checkpoint_sha256")
     _sha(checkpoint_lineage_sha256, "checkpoint_lineage_sha256")
     _sha(dataset["dataset_id"], "evaluation dataset_id")
-    _sha(per_sample["sha256"], "per_sample sha256")
+    if model_reexecuted:
+        if per_sample is None:
+            raise ValueError("a re-executed evaluation must pin its per-sample output")
+        _sha(per_sample["sha256"], "per_sample sha256")
+    elif per_sample is not None:
+        raise ValueError("training-time validation has no per-sample output")
     if not metrics:
         raise ValueError("an evaluation needs at least one metric")
     for name, value in metrics.items():
@@ -254,9 +265,9 @@ def evaluation_record(
         "suite": suite,
         "dataset": dict(dataset),
         "protocol": dict(protocol),
-        "model_reexecuted": True,
+        "model_reexecuted": bool(model_reexecuted),
         "metrics": {name: float(value) for name, value in sorted(metrics.items())},
-        "per_sample": dict(per_sample),
+        "per_sample": None if per_sample is None else dict(per_sample),
         "code": dict(code),
         "flyte_execution_id": flyte_execution_id,
         "finished_at": finished_at,
