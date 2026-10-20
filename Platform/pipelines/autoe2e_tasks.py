@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, List
+from typing import Annotated, Dict, List
 
 from flytekit import BatchSize, PodTemplate, Resources, Secret, current_context, dynamic, map_task, task
 from flytekit.types.directory import FlyteDirectory
@@ -333,7 +333,7 @@ def pack_partition(
     spec: DatasetSpec,
     plan: SourcePlan,
     partition_index: int,
-    labels: List[UnitLabel],
+    label_uris: Dict[str, str],
     version: str,
     datasets_bucket: str,
 ) -> Annotated[FlyteDirectory, BatchSize(4)]:
@@ -357,10 +357,9 @@ def pack_partition(
     materialize_units(s3, datasets_bucket, [by_id[u] for u in unit_ids], raw_root)
     labels_dir = None
     if plan.labels:
-        by_unit = {label.unit_id: label for label in labels}
         labels_root = Path(tempfile.mkdtemp(prefix="autoe2e-labels-"))
         for unit_id in unit_ids:
-            download_prefix(s3, by_unit[unit_id].artifact_uri, labels_root / unit_id)
+            download_prefix(s3, label_uris[unit_id], labels_root / unit_id)
         labels_dir = FlyteDirectory(str(labels_root))
     training = plan.split == "train"
     return data_processing.task_function(
@@ -546,6 +545,17 @@ def unit_rows(plan: SourcePlan, labels: List[UnitLabel], views: List[PartitionVi
     return rows
 
 
+@task(container_image=DATA_PREP_IMAGE, requests=Resources(cpu="1", mem="1Gi"))
+def committed_label_uris(labels: List[UnitLabel]) -> Dict[str, str]:
+    """Committed label prefixes per unit: the only label input a pack sees.
+
+    A rerun reuses the same committed attempt, so this mapping, and the pack
+    cache key built from it, is identical whether labels were just created
+    or reused.
+    """
+    return {label.unit_id: label.artifact_uri for label in labels}
+
+
 @dynamic(container_image=DATA_PREP_IMAGE, environment=_DATA_PREP_ENV)
 def build_dataset(
     spec: DatasetSpec,
@@ -565,14 +575,16 @@ def build_dataset(
     )
 
     labels: List[UnitLabel] = []
+    label_uris: Dict[str, str] = {}
     if plan.labels:
         labels = map_task(
             functools.partial(label_unit, spec=spec, plan=plan, datasets_bucket=datasets_bucket),
             concurrency=label_concurrency,
         )(unit=plan.units)
+        label_uris = committed_label_uris(labels=labels)
     packed = map_task(
         functools.partial(
-            pack_partition, spec=spec, plan=plan, labels=labels,
+            pack_partition, spec=spec, plan=plan, label_uris=label_uris,
             version=handle.version, datasets_bucket=datasets_bucket,
         ),
         concurrency=pack_concurrency,
