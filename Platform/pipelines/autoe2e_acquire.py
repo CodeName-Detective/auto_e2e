@@ -209,8 +209,10 @@ def plan_acquisition(
 
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="40Gi"),
-    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="40Gi"),
+    # The largest KITScenes scene is 20.1 GiB; the tree and its tar coexist,
+    # and a Hub download also stages the archive before extraction.
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
+    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
     retries=2,
 )
 def acquire_unit_from_recovery(
@@ -234,8 +236,10 @@ def acquire_unit_from_recovery(
 
 @task(
     container_image=DATA_PREP_IMAGE,
-    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="40Gi"),
-    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="40Gi"),
+    # The largest KITScenes scene is 20.1 GiB; the tree and its tar coexist,
+    # and a Hub download also stages the archive before extraction.
+    requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
+    limits=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
     secret_requests=[Secret(group="hf-token", key="HF_TOKEN", mount_requirement=Secret.MountType.ENV_VAR)],
     retries=2,
 )
