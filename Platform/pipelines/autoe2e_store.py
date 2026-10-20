@@ -21,8 +21,9 @@ from Platform.pipelines.autoe2e_dataset import (
     lineage_key,
     next_dataset_version,
     validate_dataset_index_record,
-    validate_publication,
+    validate_views,
     version_reservation_key,
+    views_manifest_key,
 )
 from Platform.pipelines.autoe2e_labels import (
     label_attempt_prefix,
@@ -66,11 +67,10 @@ class DatasetHandle:
     published_name: str
     version: str
     published: bool
-    manifest_key: str = ""
-    manifest_sha256: str = ""
+    views_sha256: str = ""
     lineage_key: str = ""
     lineage_sha256: str = ""
-    shard_uris: List[str] = field(default_factory=list)
+    samples: int = 0
     partition_uris: List[str] = field(default_factory=list)
 
 
@@ -142,19 +142,6 @@ def reserve_version(s3, *, bucket: str, published_name: str, dataset_id: str, ex
     raise RuntimeError(f"could not reserve a version for {published_name} after {_MAX_VERSION_ATTEMPTS} tries")
 
 
-def _check_shards(s3, bucket: str, manifest: Mapping[str, Any]) -> list[str]:
-    uris = []
-    for entry in manifest["shard_entries"]:
-        key = str(entry["key"])
-        head = s3.head_object(Bucket=bucket, Key=key)
-        if int(head["ContentLength"]) != int(entry["byte_size"]):
-            raise ValueError(f"published shard size differs: s3://{bucket}/{key}")
-        if str(head.get("ETag", "")).strip('"') != entry["etag"]:
-            raise ValueError(f"published shard ETag differs: s3://{bucket}/{key}")
-        uris.append(f"s3://{bucket}/{key}")
-    return uris
-
-
 def read_dataset_lineage(s3, *, bucket: str, key: str, sha256: str) -> dict[str, Any]:
     payload = _get_bytes(s3, bucket, key, max_bytes=_MAX_METADATA_BYTES)
     return parse_record(payload, expected_sha256=sha256, schema=DATASET_LINEAGE_SCHEMA)
@@ -184,46 +171,51 @@ def resolve_published_dataset(
         )
     record = json.loads(index_payload)
     validate_dataset_index_record(record, spec, published_name=published_name)
-    manifest_key = record["manifest_key"]
-    lock = json.loads(_get_bytes(
-        s3, bucket, manifest_key.rsplit("/", 1)[0] + "/.publication-lock.json",
-        max_bytes=_MAX_METADATA_BYTES,
-    ))
-    manifest = validate_publication(
+    views = validate_views(
         record,
-        lock=lock,
-        manifest_payload=_get_bytes(s3, bucket, manifest_key, max_bytes=_MAX_METADATA_BYTES),
+        views_payload=_get_bytes(s3, bucket, record["views_key"], max_bytes=_MAX_METADATA_BYTES),
         expected_contracts=expected_contracts,
     )
     lineage = read_dataset_lineage(
         s3, bucket=bucket, key=record["lineage_key"], sha256=record["lineage_sha256"],
     )
-    if lineage["dataset_id"] != dataset_id or lineage["published"]["manifest_sha256"] != record["manifest_sha256"]:
+    if lineage["dataset_id"] != dataset_id or lineage["views"]["sha256"] != record["views_sha256"]:
         raise ValueError("dataset lineage does not describe the indexed publication")
     return DatasetHandle(
         dataset_id=dataset_id,
         published_name=published_name,
         version=record["version"],
         published=True,
-        manifest_key=manifest_key,
-        manifest_sha256=record["manifest_sha256"],
+        views_sha256=record["views_sha256"],
         lineage_key=record["lineage_key"],
         lineage_sha256=record["lineage_sha256"],
-        shard_uris=_check_shards(s3, bucket, manifest),
-        partition_uris=verify_partition_views(s3, bucket=bucket, lineage=lineage),
+        samples=int(views["samples"]),
+        partition_uris=verify_partition_views(s3, bucket=bucket, views=views),
     )
 
 
-def verify_partition_views(s3, *, bucket: str, lineage: Mapping[str, Any]) -> list[str]:
-    """Check each training partition manifest against its digest in lineage."""
+def verify_partition_views(s3, *, bucket: str, views: Mapping[str, Any]) -> list[str]:
+    """Check each training partition manifest and its shards against the views."""
     uris = []
-    for partition in lineage["partitions"]:
+    for partition in views["partitions"]:
         prefix = partition["prefix"]
         payload = _get_bytes(s3, bucket, f"{prefix}/manifest.json", max_bytes=_MAX_METADATA_BYTES)
         if sha256_bytes(payload) != partition["manifest_sha256"]:
             raise ValueError(f"partition manifest changed: s3://{bucket}/{prefix}")
+        manifest = json.loads(payload)
+        for name in manifest.get("shard_names") or []:
+            s3.head_object(Bucket=bucket, Key=f"{prefix}/{name}")
         uris.append(f"s3://{bucket}/{prefix}")
     return uris
+
+
+def write_views_manifest(s3, *, bucket: str, views: Mapping[str, Any]) -> str:
+    payload = canonical_json_bytes(dict(views))
+    _put_immutable(
+        s3, bucket=bucket, key=views_manifest_key(views["published_name"], views["version"]),
+        payload=payload, content_type="application/json",
+    )
+    return sha256_bytes(payload)
 
 
 def write_dataset_lineage(
@@ -250,8 +242,7 @@ def write_dataset_index(
     spec: DatasetSpec,
     published_name: str,
     version: str,
-    manifest_key: str,
-    manifest_sha256: str,
+    views_sha256: str,
     lineage_sha256: str,
 ) -> str:
     """Write the by-id pointer last: it is the commit of a dataset build."""
@@ -259,8 +250,7 @@ def write_dataset_index(
         spec,
         published_name=published_name,
         version=version,
-        manifest_key=manifest_key,
-        manifest_sha256=manifest_sha256,
+        views_sha256=views_sha256,
         lineage_sha256=lineage_sha256,
     )
     key = dataset_index_key(published_name, record["dataset_id"])
