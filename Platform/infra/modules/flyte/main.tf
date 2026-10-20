@@ -87,12 +87,20 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
         },
         # Packed snapshot publication uses conditional object writes and
         # server-side copies. It never deletes or mutates an existing version.
+        # wf_autoe2e pins snapshot manifests by VersionId, which needs
+        # GetObjectVersion even for objects stored without versioning ("null").
         {
           Effect = "Allow"
-          Action = ["s3:GetObject", "s3:PutObject"]
+          Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
           Resource = [
             "arn:aws:s3:::${var.datasets_bucket}/*",
           ]
+        },
+        # Ray training reads the end time of the active p5en Capacity Block.
+        {
+          Effect   = "Allow"
+          Action   = ["ec2:DescribeCapacityReservations"]
+          Resource = "*"
         },
         {
           Effect = "Allow"
@@ -121,7 +129,7 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
       var.checkpoints_bucket != "" ? [
         {
           Effect = "Allow"
-          Action = ["s3:GetObject", "s3:PutObject"]
+          Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
           Resource = [
             "arn:aws:s3:::${var.checkpoints_bucket}/*",
           ]
