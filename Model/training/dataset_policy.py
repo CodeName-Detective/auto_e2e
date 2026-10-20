@@ -462,10 +462,9 @@ def validation_group_uids(
         raise ValueError(
             "validation manifest source revision does not match packed shards"
         )
-    if payload.get("dataset_version") != packed_dataset_version:
-        raise ValueError(
-            "validation manifest dataset version does not match packed shards"
-        )
+    # The publication label is not identity: a content-addressed rebuild
+    # publishes the same contracts and sample UIDs under a new version, and
+    # the contract and sample digests below are what pin the split.
     if payload.get("packed_contract_digest") != packed_contract_digest:
         raise ValueError(
             "validation manifest contract digest does not match packed shards"
