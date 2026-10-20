@@ -28,7 +28,7 @@ def _unit(unit_id="a", **overrides):
         unit_id=unit_id,
         partition_id=f"p-{unit_id}",
         raw_tar_key=f"kitscenes/raw-snapshots/r/s/units/{unit_id}.tar",
-        raw_tar_sha256=H("1"),
+        raw_tar_digest="sha256:" + H("1"),
         raw_index_sha256=H("2"),
         label_id=H("3"),
         label_record_sha256=H("4"),
@@ -93,7 +93,9 @@ def test_units_jsonl_round_trips_sorted_and_deterministic():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"raw_tar_sha256": "x"},
+        {"raw_tar_digest": "x"},
+        {"raw_tar_digest": H("1")},
+        {"raw_tar_digest": "md5:" + H("1")[:32]},
         {"label_id": None},
         {"label_origin": "maybe"},
         {"sample_count": -1},
@@ -232,3 +234,9 @@ def test_units_must_belong_to_published_partitions():
         _dataset([_unit("a", partition_id="p-zzz")])
     record, _ = _dataset([_unit("a", partition_id="*")])
     assert record["views"]["partitions"] == 2
+
+
+def test_s3_copied_archives_are_pinned_by_crc64nvme_without_an_index():
+    unit = _unit(raw_tar_digest="crc64nvme:8BLx0oBv5Jo=", raw_index_sha256=None,
+                 label_id=None, label_record_sha256=None, label_origin=None, label_count=0)
+    assert read_units_jsonl(units_jsonl([unit])) == [unit]
