@@ -430,9 +430,11 @@ checkpoint, `dataset`, `split`, and `training` are
 }
 ```
 
-`model_reexecuted` is always `true`: a suite that replays stored overlays
-instead of running the model is not an evaluation and is not written as
-one.
+`model_reexecuted` is `true` for every suite that runs the model on the
+dataset, and then `per_sample` pins the output. It is `false` only for
+`internal_val`, which copies the training run's own validation metrics and
+has no per-sample output (`per_sample` is `null`). A suite that replays
+stored overlays instead of running the model is not written at all.
 
 #### Verification
 
