@@ -63,7 +63,6 @@ SUPPORTED_PER_RANK_BATCH_SIZES = frozenset({1, 2, 4})
 SUPPORTED_PRECISIONS = frozenset({"fp32", "bf16"})
 SINGLE_WORKER_SMOKE_MAX_STEPS = 16
 SINGLE_WORKER_SMOKE_MAX_SOURCES = 2
-SINGLE_WORKER_KITSCENES_SMOKE_MAX_SOURCES = 16
 SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES = 256
 KITSCENES_MAX_RANK_TRUNCATION_FRACTION = 0.05
 BEV_LANE_NEAR_RADIUS_M = 30.0
@@ -577,8 +576,6 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
             and precision == "bf16"
             and not resume_uri
             and not capacity_block_end_utc
-            and int(config.get("validation_sample_limit", 0))
-            <= SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES
             and is_pretrained
             and not allow_random_init
         )
@@ -591,22 +588,24 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
             and float(config["trajectory_weight"]) == 0.0
             and float(config["bev_weight"]) > 0.0
             and float(config["route_weight"]) == 0.0
+            and int(config.get("validation_sample_limit", 0))
+            <= SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES
         )
         # One validation GPU is all that is reserved without a Capacity Block,
         # so the single pipeline's smoke fine-tunes KITScenes from the frozen
         # nuPlan parent for a few steps; the parent contract above still holds.
+        # It reads the whole corpus: the frozen validation split exists only
+        # there, and the worker checks its exact sample identity.
         kitscenes_finetune_smoke = (
             stage is ReactiveTrainingStage.KITSCENES_FINETUNE
             and bool(parent_uri)
-            and len(sources) <= SINGLE_WORKER_KITSCENES_SMOKE_MAX_SOURCES
         )
         if not bounded or not (nuplan_bev_smoke or kitscenes_finetune_smoke):
             raise ValueError(
                 "single-worker smoke must be a one-epoch, 2-16 step, "
                 "batch-one pretrained run with no resume or Capacity Block: "
                 "either nuPlan BEV-only over at most two sources without a "
-                "parent, or KITScenes fine-tuning from its nuPlan parent "
-                "over at most sixteen sources"
+                "parent, or KITScenes fine-tuning from its nuPlan parent"
             )
 
 
