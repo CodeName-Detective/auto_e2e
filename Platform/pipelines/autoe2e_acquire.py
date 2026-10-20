@@ -23,6 +23,7 @@ from flytekit import PodTemplate, Resources, Secret, dynamic, map_task, task, wo
 from flytekit.types.file import FlyteFile
 
 from Platform.pipelines.autoe2e_dataset import AutoE2EDataset, ManifestRef, ReasoningSpec
+from Platform.pipelines.autoe2e_env import PIPELINE_ENV
 from Platform.pipelines.autoe2e_snapshot import (
     build_manifest,
     index_bytes,
@@ -414,7 +415,7 @@ def nuplan_snapshot_ref(manifest: FlyteFile, manifest_sha256: str) -> ManifestRe
     return ManifestRef(uri=uri, version_id=str(head.get("VersionId") or "null"), sha256=manifest_sha256)
 
 
-@dynamic(container_image=DATA_PREP_IMAGE, environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE})
+@dynamic(container_image=DATA_PREP_IMAGE, environment={"AUTO_E2E_DATA_PREP_IMAGE": DATA_PREP_IMAGE, **PIPELINE_ENV})
 def _acquire(
     dataset: AutoE2EDataset,
     revision: str,
