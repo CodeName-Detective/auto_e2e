@@ -190,9 +190,9 @@ the manifest gate, the build writes two write-once objects:
 
 - `<dataset>/by-id/<dataset_id>.json`: the canonical spec, version, and
   manifest key and SHA-256;
-- `<dataset>/vN.M/lineage.json`: the raw snapshot manifest SHA-256, the
-  sorted list of `(unit_id, label_id, label record SHA-256)` used, the pack
-  image digest, git commit, contract versions, and the Flyte execution id.
+- `<dataset>/vN.M/lineage/dataset.json` and `units.parquet`: the dataset
+  lineage record (6.1), naming the raw snapshot, every label record, and the
+  pack code.
 
 The Console ignores both because they are not version directories or
 shards. A publication is reused only if the index's spec equals the request,
@@ -259,8 +259,8 @@ gets two versions, even across executions.
 With `epochs == 0`, nothing is trained. If the parent is a model version,
 stage 5 appends to that version's run. If the parent is an unregistered
 checkpoint, the execution creates a run and registers the checkpoint once
-with `checkpoint_role=imported`; its `lineage.json` marks `dataset`, `pack`,
-`labels`, and `raw` as unknown instead of guessing them.
+with `checkpoint_role=imported`; its checkpoint lineage marks `dataset`,
+`split`, and `training` as unknown instead of guessing them.
 
 ## 6. Traceability in MLflow
 
@@ -273,7 +273,7 @@ one run; its versions and every later evaluation of them point at it.
 | tags | `flyte_execution_id`, training image digest, git commit, capacity reservation id, `dataset_id`, `stage_index` |
 | inputs (`mlflow.log_input`) | training dataset with context `training`; each evaluation dataset with context `eval:<suite>`. Source is the by-id index URI, digest is `dataset_id` |
 | metrics | training curves per step; `eval/<role>/<suite>/<metric>` per checkpoint role |
-| artifacts | `lineage.json` (section 6.1), validation unit list, per-evaluation result files under `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` |
+| artifacts | `lineage/<checkpoint_sha256>.json` and `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` (6.1), validation unit list |
 
 Each model version carries tags: `checkpoint_role`, checkpoint URI and
 SHA-256, `dataset_id`, `parent_model_version`, `parent_checkpoint_sha256`,
@@ -283,34 +283,131 @@ evaluation dataset's version in the suite name, for example
 `eval/best/kitscenes_benchmark@kitscenes-val-v3.5/ade_3s`, so later results
 never overwrite earlier ones.
 
-### 6.1 Lineage record
+### 6.1 Lineage records
 
-`lineage.json` on the run resolves the whole chain with digests only:
+Lineage is three kinds of record. Each is canonical JSON (sorted keys,
+compact separators), carries a `schema_version`, is written once with
+`IfNoneMatch="*"`, and is identified by the SHA-256 of its bytes. A record
+refers to another record only by URI plus SHA-256, never by copying it, so
+the chain is a hash chain: changing any byte upstream breaks every digest
+downstream.
+
+| Record | Written by | Location | One per |
+|---|---|---|---|
+| dataset lineage | stage 2, after the shards and before the by-id index | `<dataset>/vN.M/lineage/dataset.json` and `units.parquet` | published dataset |
+| checkpoint lineage | stage 6, or stage 5 for an imported checkpoint | MLflow run artifact `lineage/<checkpoint_sha256>.json` | distinct checkpoint |
+| evaluation record | stage 5 | MLflow run artifact `evaluations/<checkpoint_sha256>/<suite>/<dataset_id>.json` | checkpoint, suite, and evaluation dataset |
+
+A dataset lineage is shared by every checkpoint trained on that dataset, so
+it lives with the publication in S3. Checkpoint lineage and evaluation
+records live on the MLflow run. Evaluation records are only ever added, so a
+checkpoint's history is the set of its records, and no earlier record is
+rewritten.
+
+#### Dataset lineage (`autoe2e_dataset_lineage_v1`)
+
+`units.parquet` has one row per unit used:
+
+| Column | Meaning |
+|---|---|
+| `unit_id` | scene, archive, or episode id |
+| `partition_id` | pack partition that consumed the unit |
+| `raw_tar_key`, `raw_tar_sha256`, `raw_index_sha256` | from the raw snapshot manifest |
+| `label_id`, `label_record_sha256` | null for a dataset without labels |
+| `label_origin` | `reused` or `created` in this build |
+| `sample_count`, `label_count` | contribution of the unit to the published shards |
+
+`dataset.json`:
 
 ```json
 {
-  "checkpoint": {"role": "best", "sha256": "…", "uri": "s3://…"},
-  "parent": {"model_version": "auto-e2e-driving-policy/66", "checkpoint_sha256": "…", "stage_index": 1},
-  "dataset": {"dataset_id": "…", "published": "kitscenes/v3.6", "manifest_sha256": "…"},
-  "pack": {"pack_version": "…", "contracts": {"shard": "v13", "geometry": "v7", "parser": "v3"}, "image_digest": "sha256:…", "git_commit": "…"},
-  "labels": {"label_set_sha256": "…", "units": 533, "teacher": "openai_compatible", "prompt_version": "…"},
-  "raw": {"snapshot_manifest": "s3://…/manifest.json", "sha256": "…", "upstream": "KIT-MRT/KITScenes-Multimodal@6fde0034…"},
-  "training": {"flyte_execution_id": "…", "image_digest": "sha256:…", "git_commit": "…"}
+  "schema_version": "autoe2e_dataset_lineage_v1",
+  "dataset_id": "…",
+  "spec": {"dataset": "kitscenes", "source_manifest": {"uri": "s3://…/manifest.json", "version_id": "…", "sha256": "…"}, "unit_limit": 0, "pack_version": "…", "image_size": 256, "pack_params": {}, "reasoning": {"teacher": "openai_compatible", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}},
+  "published": {"name": "kitscenes", "version": "v3.6", "manifest_key": "kitscenes/v3.6/shards/manifest.json", "manifest_sha256": "…"},
+  "raw": {"upstream": "KIT-MRT/KITScenes-Multimodal", "revision": "6fde0034…", "snapshot_manifest_sha256": "…", "units": 533},
+  "labels": {"label_policy_version": "v2", "uid_schema_version": "v1", "label_set_sha256": "…", "reused": 533, "created": 0},
+  "units": {"uri": "s3://…/kitscenes/v3.6/lineage/units.parquet", "sha256": "…", "rows": 533},
+  "pack": {"contracts": {"uid": "v1", "parser": "v3", "shard": "v13", "geometry": "v7"}, "image_digest": "sha256:…", "git_commit": "…", "task": "data_processing"},
+  "build": {"flyte_execution_id": "…", "finished_at": "2026-10-21T03:12:00Z"},
+  "totals": {"samples": 42667, "shards": 404, "reasoning_labels": 4598}
 }
 ```
 
-Walking `parent.model_version` repeats this for every earlier stage, so the
-full chain from the first raw snapshot to the current checkpoint is
-recoverable from MLflow alone.
+`label_set_sha256` is the digest of the sorted `(unit_id, label_id,
+label_record_sha256)` rows, so two datasets that share exactly the same labels
+have the same value even if their packs differ. `spec` repeats the
+`DatasetSpec` so that `dataset_id` can be recomputed from this record alone.
+
+#### Checkpoint lineage (`autoe2e_checkpoint_lineage_v1`)
+
+```json
+{
+  "schema_version": "autoe2e_checkpoint_lineage_v1",
+  "checkpoint": {"sha256": "…", "uri": "s3://…/best.pt", "role": "best", "epoch": 6, "step": 21333},
+  "stage_index": 2,
+  "parent": {"model_version": "auto-e2e-driving-policy/66", "checkpoint_sha256": "…", "lineage_sha256": "…"},
+  "dataset": {"dataset_id": "…", "lineage_uri": "s3://…/kitscenes/v3.6/lineage/dataset.json", "lineage_sha256": "…"},
+  "split": {"policy": "kitscenes_train_dev_v4", "validation_units_sha256": "…", "validation_units": 40},
+  "training": {"spec": {"gpu_profile": "RAY_8", "epochs": 10, "learning_rate": 3e-05, "per_rank_batch_size": 2, "seed": 149, "objectives": {}}, "flyte_execution_id": "…", "mlflow_run_id": "…", "image_digest": "sha256:…", "git_commit": "…", "kueue_queue": "p5en-capacity-block", "capacity_reservation_id": "cr-…"},
+  "selection": {"metric": "eval/internal_val/ade_6p4s", "value": 2.633}
+}
+```
+
+`parent` is `null` for a model trained from scratch. For an imported
+checkpoint, `dataset`, `split`, and `training` are
+`{"status": "unknown"}` instead of guesses, and `stage_index` is 0.
+
+#### Evaluation record (`autoe2e_evaluation_v1`)
+
+```json
+{
+  "schema_version": "autoe2e_evaluation_v1",
+  "checkpoint_sha256": "…",
+  "checkpoint_lineage_sha256": "…",
+  "suite": "kitscenes_benchmark",
+  "dataset": {"dataset_id": "…", "lineage_sha256": "…", "published": "kitscenes-val/v3.5"},
+  "protocol": {"name": "kitscenes_paper_approximation", "version": "v1", "horizons_s": [3, 5]},
+  "model_reexecuted": true,
+  "metrics": {"ade_3s": 0.71, "fde_3s": 1.90, "ade_5s": 1.85, "fde_5s": 5.38},
+  "per_sample": {"uri": "s3://…/per_sample.parquet", "sha256": "…", "rows": 200},
+  "code": {"image_digest": "sha256:…", "git_commit": "…"},
+  "flyte_execution_id": "…",
+  "finished_at": "…"
+}
+```
+
+`model_reexecuted` is always `true`: a suite that replays stored overlays
+instead of running the model is not an evaluation and is not written as
+one.
+
+#### Links into MLflow
+
+| Where | Key | Value |
+|---|---|---|
+| version tag | `lineage_sha256` | checkpoint lineage digest |
+| version tag | `dataset_id`, `dataset_lineage_sha256` | from the checkpoint lineage |
+| version tag | `eval.<suite>@<dataset>.<metric>` | headline metrics, copied from evaluation records |
+| run input | `mlflow.log_input` | digest `dataset_id`, source the by-id index URI, context `training` or `eval:<suite>` |
+| run artifacts | `lineage/`, `evaluations/` | the records themselves |
+
+#### Verification
+
+`verify_lineage(model_version)` walks the chain and recomputes every digest:
+the version's checkpoint lineage, the dataset lineage and `units.parquet` in
+S3, the raw snapshot manifest, the label records, each evaluation record,
+and then the parent's chain recursively. It fails on the first mismatch. The
+smoke launch plan runs it after registration, so a pipeline change that
+breaks lineage fails the smoke run.
 
 ### 6.2 Questions this answers
 
 | Question | Where |
 |---|---|
-| Which data trained this checkpoint? | version tag `dataset_id` → run input `training` → `lineage.json` `dataset` |
-| Which raw bytes and upstream revision? | `lineage.json` `raw` |
-| Which labels, from which teacher and prompt? | `lineage.json` `labels`, and the publication's `lineage.json` lists every label record |
-| Which code packed and trained it? | `lineage.json` `pack` and `training` image digests and commits |
+| Which data trained this checkpoint? | version tag `lineage_sha256` → checkpoint lineage `dataset` → dataset lineage |
+| Which raw bytes and upstream revision? | dataset lineage `raw` and `units.parquet` tar digests |
+| Which labels, from which teacher and prompt? | dataset lineage `spec.reasoning` and `labels`; `units.parquet` names every label record |
+| Which code packed and trained it? | dataset lineage `pack` and checkpoint lineage `training` |
 | What was it initialized from? | `parent`, recursively |
 | Every evaluation ever run on it, and on which data? | run metrics `eval/<role>/…`, inputs `eval:<suite>`, and `evaluations/<checkpoint_sha256>/` |
 
