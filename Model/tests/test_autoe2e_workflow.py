@@ -97,7 +97,7 @@ def test_build_dataset_compiles_for_every_label_and_console_combination(labels, 
     plan = SourcePlan(
         dataset=AutoE2EDataset.KITSCENES, upstream="u", revision="r", split="train",
         published_name="kitscenes", snapshot_manifest_sha256="e" * 64,
-        units=[UnitRef(f"u{i}", f"k{i}", "1" * 64, "i", "2" * 64) for i in range(2)],
+        units=[UnitRef(f"u{i}", f"k{i}", "sha256:" + "1" * 64, "i", "2" * 64) for i in range(2)],
         partitions=[["u0"], ["u1"]], labels=labels, console=console,
     )
     spec = DatasetSpec(
