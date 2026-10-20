@@ -16,7 +16,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 from flytekit import Resources, dynamic, task, workflow
 from flytekit.types.directory import FlyteDirectory
@@ -37,13 +37,6 @@ from Platform.pipelines.distributed_training import (
     TRAINING_IMAGE,
     _bev_evaluation_pod_template,
 )
-from Platform.pipelines.overlay_tasks import (
-    EVAL_IMAGE,
-    ResolvedOverlayModel,
-    finalize_overlay_set,
-    precompute_overlay_partition,
-    prepare_overlay_set,
-)
 
 EXPERIMENT_ENV = {
     "AUTO_E2E_MLFLOW_EXPERIMENT": "auto-e2e",
@@ -52,6 +45,9 @@ EXPERIMENT_ENV = {
     "AUTO_E2E_GIT_COMMIT": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown"),
 }
 TRAIN_ENVIRONMENT = {**RAY_TASK_ENVIRONMENT, **EXPERIMENT_ENV}
+# The overlay tasks import torch, so they are imported where they run; the
+# launcher only needs the workflow's types.
+ResolvedOverlayModel = NamedTuple("ResolvedOverlayModel", checkpoint=FlyteFile, metadata=FlyteFile)
 CAPACITY_BLOCK_NAME = "auto-e2e-p5en-capacity-block"
 
 
@@ -852,6 +848,12 @@ def publish_overlays(
     Overlays are keyed by checkpoint sha and the dataset's Console manifest,
     so they exist only for trained KITScenes models on a Console publication.
     """
+    from Platform.pipelines.overlay_tasks import (
+        EVAL_IMAGE,
+        finalize_overlay_set,
+        precompute_overlay_partition,
+        prepare_overlay_set,
+    )
     from Platform.pipelines.reproducibility import (
         container_digest_from_image,
         model_inference_code_digest,
