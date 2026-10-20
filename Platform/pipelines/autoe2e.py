@@ -5,7 +5,8 @@
 3. resolve the parent model, if any;
 4. train with Ray Train on the profile's Kueue queue (skipped when epochs=0);
 5. register one MLflow LoggedModel and version per distinct checkpoint;
-6. evaluate every suite and attach the metrics to the LoggedModels.
+6. evaluate every suite and attach the metrics to the LoggedModels;
+7. precompute the best model's Console overlays on a Console-published dataset.
 """
 
 from __future__ import annotations
@@ -35,6 +36,13 @@ from Platform.pipelines.distributed_training import (
     RAY_TASK_ENVIRONMENT,
     TRAINING_IMAGE,
     _bev_evaluation_pod_template,
+)
+from Platform.pipelines.overlay_tasks import (
+    EVAL_IMAGE,
+    ResolvedOverlayModel,
+    finalize_overlay_set,
+    precompute_overlay_partition,
+    prepare_overlay_set,
 )
 
 EXPERIMENT_ENV = {
@@ -122,6 +130,8 @@ class RuntimeOptions:
     label_concurrency: int = 5
     pack_concurrency: int = 60
     tracking_url: str = ""
+    # The Console serves overlays from this bucket; empty skips them.
+    artifacts_bucket: str = ""
 
 
 @dataclass
@@ -756,6 +766,126 @@ def evaluate(
             evaluate_kitscenes_benchmark(models=models, dataset=next(datasets), runtime=runtime)
 
 
+# --- Console overlays -------------------------------------------------------------
+
+
+def overlay_metadata(*, model: RegisteredModel, run_id: str, dataset_source: str, dataset_version: str,
+                     training: TrainingSpec, metrics_json: str, execution_id: str) -> dict:
+    """The model coordinates overlay_store writes next to every overlay pointer."""
+    from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
+
+    metrics = numeric_leaves("", json.loads(metrics_json))
+    return {
+        "registered_model_name": REGISTERED_MODEL,
+        "model_version": str(int(model.version)),
+        "run_id": run_id,
+        "artifact_uri": f"models:/{model.model_id}",
+        "checkpoint_uri": model.checkpoint_uri,
+        "checkpoint_sha256": model.checkpoint_sha256,
+        "model_name": training.backbone,
+        # Ray validation reports the full 6.4 s horizon.
+        "eval_ade": metrics.get("ade_6p4s_m"),
+        "eval_fde": metrics.get("fde_6p4s_m"),
+        "dataset_source": dataset_source,
+        "dataset_version_source": dataset_version,
+        "train_execution_id": execution_id,
+        "val_fraction": str(training.val_fraction),
+    }
+
+
+@task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=PIPELINE_ENV, retries=2)
+def resolve_overlay_checkpoint(
+    model: RegisteredModel,
+    trained: TrainedCheckpoints,
+    training: TrainingSpec,
+    dataset: DatasetHandle,
+) -> ResolvedOverlayModel:
+    """Download the stored best checkpoint and describe it for overlay_store."""
+    import tempfile
+    from pathlib import Path
+
+    import torch
+
+    from Platform.pipelines.inference import sha256_file
+
+    root = Path(tempfile.mkdtemp(prefix="overlay-model-"))
+    path = root / "best.pt"
+    bucket, _, key = model.checkpoint_uri.removeprefix("s3://").partition("/")
+    _s3().download_file(bucket, key, str(path))
+    if sha256_file(path) != model.checkpoint_sha256:
+        raise RuntimeError(f"{model.checkpoint_uri} differs from its registered sha256")
+    config = torch.load(path, map_location="cpu", weights_only=False)["config"]
+    metadata = overlay_metadata(
+        model=model, run_id=trained.run_id,
+        # Precompute checks this against the checkpoint's own training policy.
+        dataset_source=str(config["trajectory_training_policy"]["dataset_name"]),
+        dataset_version=dataset.version, training=training,
+        metrics_json=trained.best_metrics_json, execution_id=_execution_id(),
+    )
+    meta = root / "model-metadata.json"
+    meta.write_text(json.dumps(metadata, indent=2, sort_keys=True))
+    return ResolvedOverlayModel(checkpoint=FlyteFile(str(path)), metadata=FlyteFile(str(meta)))
+
+
+def console_manifest_sha256(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> str:
+    """The Console publication digest, or "" when the build was not published there."""
+    from Platform.pipelines.autoe2e_store import read_dataset_lineage
+
+    lineage = read_dataset_lineage(
+        s3, bucket=runtime.datasets_bucket, key=dataset.lineage_key, sha256=dataset.lineage_sha256,
+    )
+    return (lineage.get("console") or {}).get("manifest_sha256", "")
+
+
+@dynamic(container_image=TRAINING_IMAGE, environment=PIPELINE_ENV)
+def publish_overlays(
+    models: List[RegisteredModel],
+    trained: TrainedCheckpoints,
+    training: TrainingSpec,
+    dataset: DatasetHandle,
+    runtime: RuntimeOptions,
+) -> None:
+    """Precompute the best model's overlays so the Console can show it.
+
+    Overlays are keyed by checkpoint sha and the dataset's Console manifest,
+    so they exist only for trained KITScenes models on a Console publication.
+    """
+    from Platform.pipelines.reproducibility import (
+        container_digest_from_image,
+        model_inference_code_digest,
+        preprocessing_contract_digest,
+    )
+
+    best = [m for m in models if m.role == "best"]
+    if not (runtime.artifacts_bucket and trained.trained and best and dataset.published_name == "kitscenes"):
+        print("overlays skipped: no trained best model on the kitscenes publication")
+        return
+    manifest_sha256 = console_manifest_sha256(_s3(), dataset, runtime)
+    if not manifest_sha256:
+        print(f"overlays skipped: {dataset.published_name}/{dataset.version} is not on the Console")
+        return
+    resolved = resolve_overlay_checkpoint(model=best[0], trained=trained, training=training, dataset=dataset)
+    common = dict(
+        dataset=dataset.published_name, dataset_version=dataset.version,
+        dataset_manifest_digest=manifest_sha256, artifacts_bucket=runtime.artifacts_bucket,
+        dynamo_table=runtime.dynamo_table, aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-west-2"),
+    )
+    contract = dict(
+        preprocessing_contract_digest=preprocessing_contract_digest(),
+        model_inference_code_digest=model_inference_code_digest(),
+        container_image_digest=container_digest_from_image(EVAL_IMAGE),
+        base_seeds=[0],
+    )
+    gate = prepare_overlay_set(resolved_metadata=resolved.metadata, sampler="model-default", **common, **contract)
+    result = precompute_overlay_partition(
+        checkpoint=resolved.checkpoint, model_metadata=resolved.metadata, prepare_gate=gate,
+        shard_dirs=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
+        # BEVFormer T8 fits the benchmark evaluator's batch of 4 on one L4.
+        batch_size=4, num_workers=2, **common, **contract,
+    )
+    finalize_overlay_set(model_metadata=resolved.metadata, partition_results=[result], prepare_gate=gate, **common)
+
+
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
 def verify_models(dataset: DatasetHandle, models: List[RegisteredModel], runtime: RuntimeOptions) -> PipelineResult:
     """Recompute every lineage digest of the registered models before returning."""
@@ -800,6 +930,8 @@ def wf_autoe2e(
         models=models, evaluation=evaluation, evaluation_datasets=evaluation_datasets,
         trained=trained, dataset=published, runtime=runtime,
     )
+    overlays = publish_overlays(models=models, trained=trained, training=training, dataset=published, runtime=runtime)
     result = verify_models(dataset=published, models=models, runtime=runtime)
     done >> result
+    overlays >> result
     return result
