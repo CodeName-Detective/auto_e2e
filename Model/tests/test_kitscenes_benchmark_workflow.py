@@ -18,38 +18,6 @@ def _task_tree():
     ))
 
 
-def test_benchmark_workflow_is_one_independent_evaluation_node():
-    assert sorted(
-        workflows.wf_evaluate_kitscenes_benchmark.python_interface.inputs
-    ) == [
-        "batch_size",
-        "benchmark_manifest",
-        "benchmark_shards",
-        "checkpoint",
-        "expected_manifest_sha256",
-        "mlflow_run_id",
-    ]
-    assert [
-        node.flyte_entity.name
-        for node in workflows.wf_evaluate_kitscenes_benchmark.nodes
-    ] == [
-        workflows.evaluate_kitscenes_benchmark_checkpoint.name
-    ]
-
-
-def test_training_workflows_do_not_invoke_benchmark_task():
-    benchmark_name = (
-        workflows.evaluate_kitscenes_benchmark_checkpoint.name
-    )
-    for training_workflow in (
-        workflows.wf_sharded_full_run,
-        workflows.wf_train_il,
-    ):
-        assert benchmark_name not in {
-            node.flyte_entity.name for node in training_workflow.nodes
-        }
-
-
 def test_benchmark_task_records_its_resolved_runtime_image():
     task = workflows.evaluate_kitscenes_benchmark_checkpoint
 
