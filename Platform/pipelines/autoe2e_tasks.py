@@ -216,8 +216,14 @@ def plan_dataset(spec: DatasetSpec, datasets_bucket: str) -> SourcePlan:
             manifest, sensor_groups, database_logs,
             int(plan.pack_params["total_scenario_limit"]),
         )
+        group_limit = int(plan.pack_params["group_limit"])
+        if group_limit:
+            archive_sets, limits = archive_sets[:group_limit], limits[:group_limit]
         plan.partitions = [list(archives) for archives in archive_sets]
         plan.partition_limits = list(limits)
+        # Only archives some partition reads belong in the dataset lineage.
+        used = {archive for archives in plan.partitions for archive in archives}
+        plan.units = [unit for unit in plan.units if unit.unit_id in used]
     return plan
 
 
@@ -348,9 +354,19 @@ def pack_partition(
     s3 = _s3()
     unit_ids = plan.partitions[partition_index]
     if spec.dataset is AutoE2EDataset.NUPLAN:
-        raise NotImplementedError(
-            "nuPlan Reactive packs carry no partition_id, which Ray's dataset plan "
-            "requires; the nuPlan packer must emit one before wf_autoe2e can build nuPlan"
+        from flytekit.types.file import FlyteFile
+
+        from Platform.pipelines.nuplan_dataset import pack_nuplan_snapshot_reactive_dataset
+
+        return pack_nuplan_snapshot_reactive_dataset.task_function(
+            snapshot_manifest=FlyteFile(spec.source_manifest.uri),
+            datasets_bucket=datasets_bucket,
+            archive_ids=list(unit_ids),
+            limit_total_scenarios=int(plan.partition_limits[partition_index]),
+            image_size=spec.image_size,
+            samples_per_shard=int(plan.pack_params["samples_per_shard"]),
+            max_rejection_fraction=float(plan.pack_params["max_rejection_fraction"]),
+            aws_region=AWS_REGION,
         )
 
     from Platform.pipelines.workflows import Dataset, data_processing
@@ -598,6 +614,14 @@ def build_dataset(
         ),
         concurrency=pack_concurrency,
     )(partition_index=list(range(len(plan.partitions))))
+    if plan.dataset is AutoE2EDataset.NUPLAN:
+        from Platform.pipelines.nuplan_dataset import NUPLAN_FULL_PACK_EPHEMERAL_STORAGE
+
+        # A sensor group pack downloads and extracts whole 157-250 GB archives.
+        packed = packed.with_overrides(
+            requests=Resources(cpu="16", mem="64Gi", ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE),
+            limits=Resources(cpu="16", mem="64Gi", ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE),
+        )
     views = map_task(
         functools.partial(
             publish_partition_view, published_name=plan.published_name,
