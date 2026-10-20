@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from flytekit import Resources, Secret, dynamic, map_task, task, workflow
+from flytekit import PodTemplate, Resources, Secret, dynamic, map_task, task, workflow
 from flytekit.types.file import FlyteFile
 
 from Platform.pipelines.autoe2e_dataset import AutoE2EDataset, ManifestRef, ReasoningSpec
@@ -48,6 +48,9 @@ UPSTREAM = {
     AutoE2EDataset.L2D: "yaak-ai/L2D",
 }
 RECOVERY_SCHEMA = "kitscenes_recovery_manifest_v1"
+# Karpenter consolidation evicted the first acquisition's download pods as
+# "Underutilized"; long transfers must not be disrupted.
+_DO_NOT_DISRUPT = PodTemplate(annotations={"karpenter.sh/do-not-disrupt": "true"})
 
 
 @dataclass
@@ -209,6 +212,7 @@ def plan_acquisition(
 
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
     # The largest KITScenes scene is 20.1 GiB; the tree and its tar coexist,
     # and a Hub download also stages the archive before extraction.
     requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
@@ -236,6 +240,7 @@ def acquire_unit_from_recovery(
 
 @task(
     container_image=DATA_PREP_IMAGE,
+    pod_template=_DO_NOT_DISRUPT,
     # The largest KITScenes scene is 20.1 GiB; the tree and its tar coexist,
     # and a Hub download also stages the archive before extraction.
     requests=Resources(cpu="4", mem="16Gi", ephemeral_storage="80Gi"),
