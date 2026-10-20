@@ -249,6 +249,8 @@ pack) reads the same files from the snapshot instead.
 
 Known gaps:
 
+- nuPlan Reactive packs carry no `partition_id`, which Ray's dataset plan
+  requires, so `pack_partition` refuses nuPlan until the packer emits one.
 - The L2D Reactive contract needs OSM navigation (14 map channels), but no
   Flyte task passes `osm_graph_snapshot_path` to the packer. The L2D adapter
   rejects a spec without `osm_graph_snapshot` until that is wired.
@@ -454,11 +456,25 @@ All answers start from the model version page and stay inside MLflow.
 | What was it initialized from? | `parent_model_id`, which links to the parent's model page, recursively |
 | Every evaluation ever run on it, and on which data? | the LoggedModel metrics, each tied to its evaluation dataset, and `evaluations/` |
 
-## 7. Launch Plans
+## 7. Launching and the smoke run
 
-Only `autoe2e_smoke` is defined: KITScenes with `unit_limit=10`, `RAY_1`, 1
-epoch, `INTERNAL_VAL`. Every other run passes its specs explicitly, so its
-inputs are visible on the execution page.
+There are no launch plans with defaults: bucket names and manifest digests
+are account-specific and stay out of git. `Platform/scripts/launch_autoe2e.py`
+launches either workflow from a JSON run file under the gitignored
+`Platform/scripts/runs/`, and prints the typed inputs first.
+
+The smoke run exercises every stage that current capacity allows:
+
+- KITScenes train with `unit_limit=10`: snapshot read, label reuse, pack,
+  views, Console publication, lineage, and index;
+- KITScenes val with a few units for the benchmark;
+- `epochs=0` with the existing fine-tuned checkpoint as a bare parent, so
+  import, benchmark re-execution, dataset-tied metrics, and
+  `verify_lineage` all run.
+
+Training itself is not in the smoke run. `ray_1` accepts only the nuPlan
+BEV-only single-rank smoke contract, `ray_2` needs two validation GPUs while
+the reservation has one, and `ray_4`/`ray_8` need a Capacity Block.
 
 ## 8. Deletion
 
