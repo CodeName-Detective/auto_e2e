@@ -11,9 +11,11 @@ from Platform.pipelines.autoe2e_dataset import (
     AutoE2EDataset,
     DatasetSpec,
     ManifestRef,
+    ReasoningSpec,
     compute_dataset_id,
 )
 from Platform.pipelines.autoe2e_tasks import (
+    DatasetHandle,
     resolve_published_dataset,
     write_dataset_index,
 )
@@ -217,3 +219,37 @@ def test_index_is_write_once():
         write_dataset_index(
             s3, bucket=BUCKET, spec=spec, version="v3.5", publication=other
         )
+
+
+@pytest.mark.parametrize(
+    ("value", "python_type"),
+    [
+        (_spec(), DatasetSpec),
+        (
+            _spec(
+                dataset=AutoE2EDataset.NUPLAN,
+                reasoning=ReasoningSpec(teacher="t", prompt_version="p", label_stride=10),
+            ),
+            DatasetSpec,
+        ),
+        (
+            DatasetHandle(
+                dataset_id="a" * 64,
+                version="v3.4",
+                published=True,
+                manifest_key="kitscenes/v3.4/shards/manifest.json",
+                manifest_sha256="b" * 64,
+                shard_uris=["s3://datasets/kitscenes/v3.4/shards/a.tar"],
+            ),
+            DatasetHandle,
+        ),
+    ],
+)
+def test_task_interface_types_round_trip_through_flyte(value, python_type):
+    from flytekit.core.context_manager import FlyteContextManager
+    from flytekit.core.type_engine import TypeEngine
+
+    ctx = FlyteContextManager.current_context()
+    literal_type = TypeEngine.to_literal_type(python_type)
+    literal = TypeEngine.to_literal(ctx, value, python_type, literal_type)
+    assert TypeEngine.to_python_value(ctx, literal, python_type) == value
