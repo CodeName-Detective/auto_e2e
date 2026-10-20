@@ -266,5 +266,5 @@ def lineage_artifacts(
     files = {"lineage/checkpoint.json": checkpoint_lineage}
     for dataset_id, dataset_json, units in datasets:
         files[f"lineage/datasets/{dataset_id}/dataset.json"] = dataset_json
-        files[f"lineage/datasets/{dataset_id}/units.parquet"] = units
+        files[f"lineage/datasets/{dataset_id}/units.jsonl"] = units
     return files
