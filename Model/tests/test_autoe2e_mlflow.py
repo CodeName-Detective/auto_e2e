@@ -127,7 +127,7 @@ def test_logged_model_is_created_once_with_artifacts_and_description():
     assert first.status == "READY"
     assert first.tags[DESCRIPTION_TAG] == "desc"
     assert (first.model_id, "lineage/checkpoint.json") in client.artifacts
-    assert (first.model_id, f"lineage/datasets/{H('d')}/units.parquet") in client.artifacts
+    assert (first.model_id, f"lineage/datasets/{H('d')}/units.jsonl") in client.artifacts
     assert _ensure(client).model_id == first.model_id
     assert len(client.models) == 1
 
