@@ -67,6 +67,9 @@ class DatasetHandle:
     published_name: str
     version: str
     published: bool
+    # The execution that reserved the version; stable across reruns, so the
+    # write-once lineage names the same build every time.
+    reserved_by: str = ""
     views_sha256: str = ""
     lineage_key: str = ""
     lineage_sha256: str = ""
@@ -117,7 +120,7 @@ def _version_dirs(s3, bucket: str, published_name: str) -> list[str]:
     return versions
 
 
-def reserve_version(s3, *, bucket: str, published_name: str, dataset_id: str, execution_id: str) -> str:
+def reserve_version(s3, *, bucket: str, published_name: str, dataset_id: str, execution_id: str) -> tuple[str, str]:
     """Return the one version this dataset_id builds under, reserving it once.
 
     A rerun of the same spec gets the same version back, so an aborted build
@@ -128,7 +131,8 @@ def reserve_version(s3, *, bucket: str, published_name: str, dataset_id: str, ex
     build_key = build_reservation_key(published_name, dataset_id)
     existing = get_optional(s3, bucket, build_key)
     if existing is not None:
-        return str(json.loads(existing)["version"])
+        record = json.loads(existing)
+        return str(record["version"]), str(record["execution_id"])
     for _ in range(_MAX_VERSION_ATTEMPTS):
         version = next_dataset_version(_version_dirs(s3, bucket, published_name))
         claim = canonical_json_bytes({"dataset_id": dataset_id, "execution_id": execution_id})
@@ -136,9 +140,9 @@ def reserve_version(s3, *, bucket: str, published_name: str, dataset_id: str, ex
             continue
         reservation = canonical_json_bytes({"version": version, "execution_id": execution_id})
         if put_if_absent(s3, bucket, build_key, reservation):
-            return version
+            return version, execution_id
         winner = json.loads(get_optional(s3, bucket, build_key) or b"{}")
-        return str(winner["version"])
+        return str(winner["version"]), str(winner["execution_id"])
     raise RuntimeError(f"could not reserve a version for {published_name} after {_MAX_VERSION_ATTEMPTS} tries")
 
 
@@ -160,14 +164,16 @@ def resolve_published_dataset(
     dataset_id = compute_dataset_id(spec)
     index_payload = get_optional(s3, bucket, dataset_index_key(published_name, dataset_id))
     if index_payload is None:
+        version, reserved_by = reserve_version(
+            s3, bucket=bucket, published_name=published_name,
+            dataset_id=dataset_id, execution_id=execution_id,
+        )
         return DatasetHandle(
             dataset_id=dataset_id,
             published_name=published_name,
-            version=reserve_version(
-                s3, bucket=bucket, published_name=published_name,
-                dataset_id=dataset_id, execution_id=execution_id,
-            ),
+            version=version,
             published=False,
+            reserved_by=reserved_by,
         )
     record = json.loads(index_payload)
     validate_dataset_index_record(record, spec, published_name=published_name)
@@ -186,6 +192,7 @@ def resolve_published_dataset(
         published_name=published_name,
         version=record["version"],
         published=True,
+        reserved_by=str(lineage["build"].get("flyte_execution_id", "")),
         views_sha256=record["views_sha256"],
         lineage_key=record["lineage_key"],
         lineage_sha256=record["lineage_sha256"],
