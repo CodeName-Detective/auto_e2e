@@ -154,8 +154,11 @@ def ensure_logged_model(
     if existing is not None:
         if dict(existing.params) != dict(params):
             raise RuntimeError(f"LoggedModel {existing.model_id} has different params for {sha}")
-        if str(existing.status) == "READY" or getattr(existing.status, "name", "") == "READY":
+        status = getattr(existing.status, "name", str(existing.status))
+        if status == "READY":
             return existing
+        if status == "FAILED":
+            raise RuntimeError(f"LoggedModel {existing.model_id} for {sha} is FAILED; inspect it before reuse")
         # A retry after a crash between create and finalize: finish it.
         model = existing
     else:
