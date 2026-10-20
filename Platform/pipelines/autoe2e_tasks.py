@@ -497,6 +497,7 @@ def commit_dataset(
             "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown"),
         },
         build={"flyte_execution_id": _execution_id(), "finished_at": datetime.now(timezone.utc).isoformat()},
+        packed_reasoning_labels=sum(v.reasoning_label_count for v in views),
     )
     _, lineage_sha256 = write_dataset_lineage(
         s3, bucket=datasets_bucket, published_name=plan.published_name, version=version,
