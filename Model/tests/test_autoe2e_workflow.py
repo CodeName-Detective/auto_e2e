@@ -181,3 +181,21 @@ def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
         )
     names = sorted(node.id for node in spec.nodes)
     assert len(names) == 4
+
+
+def test_the_launcher_imports_both_workflows_without_torch():
+    """launch_autoe2e.py only needs input types; torch is not installed there."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    script = (
+        "import sys\n"
+        "sys.modules['torch'] = None\n"
+        "sys.modules['numpy'] = None\n"
+        "import Platform.pipelines.autoe2e, Platform.pipelines.autoe2e_acquire\n"
+    )
+    env = {"PYTHONPATH": f"{root / 'Model'}:{root}", "PATH": "/usr/bin:/bin"}
+    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr[-2000:]
