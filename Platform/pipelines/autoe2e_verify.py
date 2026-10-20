@@ -158,7 +158,9 @@ def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], paylo
     if sha256_bytes(manifest) != lineage["raw"]["snapshot_manifest_sha256"]:
         raise ValueError(f"{dataset_id}: raw snapshot manifest changed")
     snapshot = json.loads(manifest)
+    # autoe2e snapshots list units; the nuPlan snapshot lists archives.
     tar_digests = {u["unit_id"]: u["tar_sha256"] for u in snapshot.get("units", [])}
+    tar_digests.update({a["archive_id"]: a["sha256"] for a in snapshot.get("archives", [])})
     bucket = units_uri.split("/")[2]
     views_key = lineage["views"]["key"]
     if sha256_bytes(s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()) != lineage["views"]["sha256"]:
