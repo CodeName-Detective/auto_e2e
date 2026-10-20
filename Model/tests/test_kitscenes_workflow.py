@@ -964,7 +964,11 @@ def test_all_flyte_runtime_installations_pin_the_shared_sdk_version():
     )
     runtime_files = []
     for path in candidates:
-        source = path.read_text(encoding="utf-8")
+        # Import checks (`python -c "import flytekit"`) are not installations.
+        source = "\n".join(
+            line for line in path.read_text(encoding="utf-8").splitlines()
+            if "python -c" not in line
+        )
         if "flytekit" in source:
             runtime_files.append(path)
             assert "flytekit==1.16.24" in source, path
