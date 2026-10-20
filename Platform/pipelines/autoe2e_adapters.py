@@ -233,20 +233,33 @@ def read_source(spec: DatasetSpec, payload: bytes) -> SourcePlan:
     return _READERS[spec.dataset](spec, payload)
 
 
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(8 * 1024**2), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def extract_unit_tar(stream: io.BufferedIOBase, unit_id: str, root: Path) -> list[str]:
     """Extract one unit tar under ``root``, stripping the ``<unit_id>/`` prefix.
 
+    Streams each member in chunks, so member size never bounds memory.
     Members of different units may share a path only if their bytes are
     identical (for example KITScenes ``data/sequence_archives.csv``).
     Returns the relative paths written.
     """
     import hashlib
+    import os
+    import shutil
 
     written = []
     prefix = f"{unit_id}/"
     with tarfile.open(fileobj=stream, mode="r|") as tar:
         for info in tar:
-            if not info.isfile() or not info.name.startswith(prefix):
+            if not info.isreg() or info.issparse() or not info.name.startswith(prefix):
                 raise ValueError(f"unexpected tar member {info.name!r} in unit {unit_id}")
             relative = info.name[len(prefix):]
             parts = relative.split("/")
@@ -255,13 +268,20 @@ def extract_unit_tar(stream: io.BufferedIOBase, unit_id: str, root: Path) -> lis
             target = root.joinpath(*parts)
             handle = tar.extractfile(info)
             assert handle is not None
-            body = handle.read()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(f".{target.name}.{unit_id}.partial")
+            digest = hashlib.sha256()
+            with partial.open("wb") as out:
+                for chunk in iter(lambda: handle.read(8 * 1024**2), b""):
+                    digest.update(chunk)
+                    out.write(chunk)
             if target.exists():
-                existing = target.read_bytes()
-                if hashlib.sha256(existing).digest() != hashlib.sha256(body).digest():
+                same = _file_sha256(target) == digest.hexdigest()
+                partial.unlink()
+                if not same:
                     raise ValueError(f"units disagree on shared file {relative!r}")
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(body)
+            os.replace(partial, target)
             written.append(relative)
+    shutil.rmtree(root / ".partial", ignore_errors=True)
     return written
