@@ -35,7 +35,7 @@ from Platform.pipelines.autoe2e_snapshot import (
 from Platform.pipelines.dataset_publication import sha256_bytes
 
 KIT = AutoE2EDataset.KITSCENES
-REASONING = ReasoningSpec("openai_compatible", "action_relevant_reasoning_v3_temporal_front256", 10)
+REASONING = ReasoningSpec("openai_compatible", "nvidia/Cosmos3-Nano", "action_relevant_reasoning_v3_temporal_front256", 10)
 
 
 def _unit_tar(unit: str, files: dict[str, bytes]) -> bytes:
