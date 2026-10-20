@@ -116,3 +116,36 @@ def test_build_dataset_compiles_for_every_label_and_console_combination(labels, 
             datasets_bucket="d", dynamo_table="t", label_concurrency=2, pack_concurrency=2,
         )
     assert spec_out.nodes
+
+
+def test_every_dynamic_carries_the_registration_environment():
+    """Tasks compiled inside a dynamic must not fall back to :latest images."""
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import importlib\n"
+        "from flytekit.core.python_function_task import PythonFunctionTask\n"
+        "bad = []\n"
+        "dynamics = 0\n"
+        "for name in ('Platform.pipelines.autoe2e', 'Platform.pipelines.autoe2e_tasks', 'Platform.pipelines.autoe2e_acquire'):\n"
+        "    module = importlib.import_module(name)\n"
+        "    for value in vars(module).values():\n"
+        "        if isinstance(value, PythonFunctionTask) and value.execution_mode is PythonFunctionTask.ExecutionBehavior.DYNAMIC and value.name.startswith(name):\n"
+        "            dynamics += 1\n"
+        "            env = value.environment or {}\n"
+        "            if env.get('AUTO_E2E_TRAINING_IMAGE') != 'img/training@sha256:t' or env.get('AUTO_E2E_DATA_PREP_IMAGE') != 'img/data-prep@sha256:d':\n"
+        "                bad.append(value.name)\n"
+        "print(bad)\n"
+        "assert dynamics >= 6, dynamics\n"
+        "assert not bad, bad\n"
+    )
+    env = {
+        **os.environ,
+        "AUTO_E2E_TRAINING_IMAGE": "img/training@sha256:t",
+        "AUTO_E2E_DATA_PREP_IMAGE": "img/data-prep@sha256:d",
+        "AUTO_E2E_GIT_COMMIT": "abc",
+    }
+    result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
