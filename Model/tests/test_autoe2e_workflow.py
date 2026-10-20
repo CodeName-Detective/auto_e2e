@@ -81,3 +81,38 @@ def test_pack_partition_is_cached_and_label_unit_is_not():
 
     assert tasks.pack_partition.metadata.cache is True
     assert tasks.label_unit.metadata.cache is False
+
+
+@pytest.mark.parametrize(("labels", "console"), [(True, True), (True, False), (False, True), (False, False)])
+def test_build_dataset_compiles_for_every_label_and_console_combination(labels, console):
+    """map_task turns unbound defaulted inputs into required lists; compile catches it."""
+    from flytekit.configuration import ImageConfig, SerializationSettings
+    from flytekit.core.context_manager import ExecutionState, FlyteContextManager
+
+    import Platform.pipelines.autoe2e_tasks as tasks
+    from Platform.pipelines.autoe2e_adapters import SourcePlan, UnitRef, current_pack_version
+    from Platform.pipelines.autoe2e_dataset import AutoE2EDataset, DatasetSpec, ManifestRef, ReasoningSpec
+    from Platform.pipelines.autoe2e_store import DatasetHandle
+
+    plan = SourcePlan(
+        dataset=AutoE2EDataset.KITSCENES, upstream="u", revision="r", split="train",
+        published_name="kitscenes", snapshot_manifest_sha256="e" * 64,
+        units=[UnitRef(f"u{i}", f"k{i}", "1" * 64, "i", "2" * 64) for i in range(2)],
+        partitions=[["u0"], ["u1"]], labels=labels, console=console,
+    )
+    spec = DatasetSpec(
+        dataset=AutoE2EDataset.KITSCENES,
+        source_manifest=ManifestRef("s3://d/m.json", "null", "e" * 64),
+        pack_version=current_pack_version(AutoE2EDataset.KITSCENES), image_size=512,
+        reasoning=ReasoningSpec("openai_compatible", "nvidia/Cosmos3-Nano", "p", 10) if labels else None,
+    )
+    handle = DatasetHandle("d" * 64, "kitscenes", "v9.9", False, "exec-1")
+    settings = SerializationSettings(image_config=ImageConfig.auto_default_image())
+    ctx = FlyteContextManager.current_context()
+    state = ctx.execution_state.with_params(mode=ExecutionState.Mode.TASK_EXECUTION)
+    with FlyteContextManager.with_context(ctx.with_serialization_settings(settings).with_execution_state(state)) as compiled:
+        spec_out = tasks.build_dataset.compile_into_workflow(
+            compiled, tasks.build_dataset._task_function, spec=spec, plan=plan, handle=handle,
+            datasets_bucket="d", dynamo_table="t", label_concurrency=2, pack_concurrency=2,
+        )
+    assert spec_out.nodes
