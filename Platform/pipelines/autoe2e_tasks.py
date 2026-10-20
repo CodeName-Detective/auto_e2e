@@ -265,7 +265,6 @@ def label_unit(
     s3 = _s3()
     identity = _label_identity(spec, plan, unit.unit_id)
     record = lookup_label_set(s3, bucket=datasets_bucket, dataset=spec.dataset, identity=identity)
-    origin = "reused"
     if record is None:
         served = _teacher_model()
         if served != spec.reasoning.teacher_model:
@@ -305,7 +304,8 @@ def label_unit(
             s3, bucket=datasets_bucket, dataset=spec.dataset, identity=identity,
             attempt_id=attempt, label_count=int(meta["num_records"]),
         )
-        origin = "created"
+    # A fact of the committed record, identical on every rerun.
+    origin = "adopted" if str(record["attempt_id"]).startswith("adopted-") else "created"
     return UnitLabel(
         unit_id=unit.unit_id,
         label_id=record["label_id"],
@@ -327,7 +327,9 @@ def label_unit(
     # the write-once publication of a reserved version must see identical
     # bytes, or a failed build could never be finished.
     cache=True,
-    cache_version="autoe2e-pack-v1",
+    # The image is part of the key, so a packer fix in a new image never
+    # reuses a pack made by the old one.
+    cache_version=f"autoe2e-pack-v1-{sha256_bytes(DATA_PREP_IMAGE.encode())[:16]}",
 )
 def pack_partition(
     spec: DatasetSpec,
@@ -436,6 +438,7 @@ def commit_dataset(
     spec: DatasetSpec,
     plan: SourcePlan,
     version: str,
+    reserved_by: str,
     labels: List[UnitLabel],
     views: List[PartitionView],
     console_manifest_key: str,
@@ -496,7 +499,9 @@ def commit_dataset(
             "image_digest": DATA_PREP_IMAGE,
             "git_commit": os.environ.get("AUTO_E2E_GIT_COMMIT", "unknown"),
         },
-        build={"flyte_execution_id": _execution_id(), "finished_at": datetime.now(timezone.utc).isoformat()},
+        # Only values that a rerun reproduces: the write-once lineage must come
+        # out byte-identical when a failed commit is retried.
+        build={"flyte_execution_id": reserved_by},
         packed_reasoning_labels=sum(v.reasoning_label_count for v in views),
     )
     _, lineage_sha256 = write_dataset_lineage(
@@ -577,9 +582,11 @@ def build_dataset(
 
     labels: List[UnitLabel] = []
     label_uris: Dict[str, str] = {}
+    # map_task turns every unbound defaulted input into a required list, so
+    # every scalar is bound here explicitly.
     if plan.labels:
         labels = map_task(
-            functools.partial(label_unit, spec=spec, plan=plan, datasets_bucket=datasets_bucket),
+            functools.partial(label_unit, spec=spec, plan=plan, datasets_bucket=datasets_bucket, label_workers=2),
             concurrency=label_concurrency,
         )(unit=plan.units)
         label_uris = committed_label_uris(labels=labels)
@@ -603,17 +610,19 @@ def build_dataset(
             functools.partial(
                 publish_dataset_partition, published_dataset=plan.published_name,
                 dataset_version=handle.version, datasets_bucket=datasets_bucket,
+                aws_region=AWS_REGION, copy_workers=16,
             ),
             concurrency=pack_concurrency,
         )(shard_dir=packed)
         publication = finalize_dataset_publication(
             partition_results=results, published_dataset=plan.published_name,
             dataset_version=handle.version, datasets_bucket=datasets_bucket,
-            dynamo_table=dynamo_table,
+            dynamo_table=dynamo_table, aws_region=AWS_REGION,
         )
         console_key, console_sha = publication.manifest_key, publication.manifest_sha256
     return commit_dataset(
-        spec=spec, plan=plan, version=handle.version, labels=labels, views=views,
+        spec=spec, plan=plan, version=handle.version, reserved_by=handle.reserved_by,
+        labels=labels, views=views,
         console_manifest_key=console_key, console_manifest_sha256=console_sha,
         datasets_bucket=datasets_bucket,
     )
