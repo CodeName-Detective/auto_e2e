@@ -14,7 +14,6 @@ from flytekit import (
     dynamic,
     map_task,
     task,
-    workflow,
 )
 from flytekit.types.directory import FlyteDirectory
 from flytekit.types.file import FlyteFile
@@ -1199,22 +1198,6 @@ def _acquire_nuplan_raw_snapshot(
     )
 
 
-@workflow
-def wf_acquire_nuplan_raw_snapshot(
-    source_manifest: FlyteFile,
-    datasets_bucket: str,
-    aws_region: str = "us-west-2",
-    concurrency: int = 4,
-) -> NuPlanRawSnapshotOutput:
-    """Acquire authorized archives once into an immutable S3 snapshot."""
-    return _acquire_nuplan_raw_snapshot(
-        source_manifest=source_manifest,
-        datasets_bucket=datasets_bucket,
-        aws_region=aws_region,
-        concurrency=concurrency,
-    )
-
-
 @task(
     container_image=DATA_PREP_IMAGE,
     pod_template=_data_prep_pod_template(),
@@ -1403,54 +1386,6 @@ def _pack_nuplan_snapshot_reactive_dataset_sharded(
             mem="64Gi",
             ephemeral_storage=NUPLAN_FULL_PACK_EPHEMERAL_STORAGE,
         ),
-    )
-
-
-@workflow
-def wf_pack_nuplan_snapshot_reactive_dataset(
-    snapshot_manifest: FlyteFile,
-    datasets_bucket: str,
-    archive_ids: Optional[List[str]] = None,
-    limit_total_scenarios: int = 0,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
-    samples_per_shard: int = 100,
-    max_rejection_fraction: float = 0.0,
-    aws_region: str = "us-west-2",
-) -> FlyteDirectory:
-    """Build Stage A BEV v3 shards from an immutable raw snapshot."""
-    return pack_nuplan_snapshot_reactive_dataset(
-        snapshot_manifest=snapshot_manifest,
-        datasets_bucket=datasets_bucket,
-        archive_ids=archive_ids,
-        limit_total_scenarios=limit_total_scenarios,
-        image_size=image_size,
-        samples_per_shard=samples_per_shard,
-        max_rejection_fraction=max_rejection_fraction,
-        aws_region=aws_region,
-    )
-
-
-@workflow
-def wf_pack_nuplan_snapshot_reactive_dataset_sharded(
-    snapshot_manifest: FlyteFile,
-    datasets_bucket: str,
-    total_scenario_limit: int = NUPLAN_FULL_TRAIN_SAMPLE_LIMIT,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
-    samples_per_shard: int = 100,
-    max_rejection_fraction: float = 0.25,
-    aws_region: str = "us-west-2",
-    concurrency: int = 4,
-) -> List[FlyteDirectory]:
-    """Pack bounded samples with complete nuPlan train-log coverage."""
-    return _pack_nuplan_snapshot_reactive_dataset_sharded(
-        snapshot_manifest=snapshot_manifest,
-        datasets_bucket=datasets_bucket,
-        total_scenario_limit=total_scenario_limit,
-        image_size=image_size,
-        samples_per_shard=samples_per_shard,
-        max_rejection_fraction=max_rejection_fraction,
-        aws_region=aws_region,
-        concurrency=concurrency,
     )
 
 
@@ -1679,39 +1614,3 @@ def _pack_nuplan_snapshot_scene_dataset(
     ]
     return flatten_nuplan_scene_partitions(groups=packed)
 
-
-@workflow
-def wf_pack_nuplan_snapshot_scene_dataset(
-    snapshot_manifest: FlyteFile,
-    datasets_bucket: str,
-    group_indices: List[int],
-    split: str = "test",
-    scenes_per_group: int = 10,
-    frames_per_scene: int = NUPLAN_SCENE_FRAMES,
-    publication_version: str = NUPLAN_SCENE_PUBLICATION_VERSION,
-    preferred_scenario_types: List[str] = NUPLAN_SCENE_PREFERRED_TYPES,
-    image_size: int = REACTIVE_CAMERA_IMAGE_SIZE,
-    scene_workers: int = NUPLAN_SCENE_WORKERS,
-    require_mission_goal: bool = False,
-    aws_region: str = "us-west-2",
-) -> List[FlyteDirectory]:
-    """Pack Console-publishable 10 Hz scenes from held-out nuPlan logs.
-
-    The official test logs omit the mission goal of many scenes, so goals
-    are optional by default; the route corridor is still taken from the
-    scene roadblocks and only the destination channel becomes invalid.
-    """
-    return _pack_nuplan_snapshot_scene_dataset(
-        snapshot_manifest=snapshot_manifest,
-        datasets_bucket=datasets_bucket,
-        split=split,
-        group_indices=group_indices,
-        scenes_per_group=scenes_per_group,
-        frames_per_scene=frames_per_scene,
-        publication_version=publication_version,
-        preferred_scenario_types=preferred_scenario_types,
-        image_size=image_size,
-        scene_workers=scene_workers,
-        require_mission_goal=require_mission_goal,
-        aws_region=aws_region,
-    )
