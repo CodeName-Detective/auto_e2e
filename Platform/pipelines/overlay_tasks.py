@@ -1382,6 +1382,7 @@ def resolve_overlay_model(
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     environment=OVERLAY_TASK_ENV,
+    retries=2,
 )
 def prepare_overlay_set(
     resolved_metadata: FlyteFile,
@@ -1510,6 +1511,8 @@ def prepare_overlay_set(
         "kueue.x-k8s.io/queue-name": "gpu-validation",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
+    # Finished shards are skipped by their S3 head, so a retry resumes.
+    retries=2,
 )
 def precompute_overlay_partition(
     checkpoint: FlyteFile,
