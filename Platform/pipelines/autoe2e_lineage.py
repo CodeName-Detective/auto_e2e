@@ -119,7 +119,8 @@ def dataset_lineage(
     labels: Optional[Mapping[str, Any]],
     units: Sequence[UnitLineage],
     units_uri: str,
-    partitions: Sequence[Mapping[str, Any]],
+    views: Mapping[str, Any],
+    console: Optional[Mapping[str, Any]],
     pack: Mapping[str, Any],
     build: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bytes]:
@@ -129,20 +130,14 @@ def dataset_lineage(
     _sha(dataset_id, "dataset_id")
     if sha256_bytes(canonical_json_bytes(dict(spec))) != dataset_id:
         raise ValueError("dataset_id is not the digest of the given spec")
-    _sha(published["manifest_sha256"], "published manifest_sha256")
     _sha(raw["snapshot_manifest_sha256"], "raw snapshot_manifest_sha256")
     payload = units_jsonl(units)
-    ordered_partitions = sorted((dict(p) for p in partitions), key=lambda p: p["partition_id"])
-    ids = [p["partition_id"] for p in ordered_partitions]
-    if not ids or len(set(ids)) != len(ids):
-        raise ValueError("partitions must be non-empty and unique")
-    for partition in ordered_partitions:
-        if set(partition) != {"partition_id", "prefix", "manifest_sha256", "sample_count"}:
-            raise ValueError(f"partition {partition['partition_id']} has unexpected fields")
-        _sha(partition["manifest_sha256"], f"partition {partition['partition_id']} manifest_sha256")
-    unit_partitions = {u.partition_id for u in units}
-    if not unit_partitions <= set(ids):
+    _sha(views["sha256"], "views sha256")
+    partition_ids = set(views["partition_ids"])
+    if not {u.partition_id for u in units} <= partition_ids:
         raise ValueError("units reference partitions that are not published")
+    if console is not None:
+        _sha(console["manifest_sha256"], "console manifest_sha256")
     labelled = [u for u in units if u.label_id is not None]
     if labels is None:
         if labelled:
@@ -167,7 +162,8 @@ def dataset_lineage(
         "raw": {**dict(raw), "units": len(units)},
         "labels": label_summary,
         "units": {"uri": units_uri, "sha256": sha256_bytes(payload), "rows": len(units)},
-        "partitions": ordered_partitions,
+        "views": {"key": views["key"], "sha256": views["sha256"], "partitions": len(partition_ids)},
+        "console": None if console is None else dict(console),
         "pack": dict(pack),
         "build": dict(build),
         "totals": {
