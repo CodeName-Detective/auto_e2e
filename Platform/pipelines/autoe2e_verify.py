@@ -36,12 +36,20 @@ def _download(model, relative: str) -> bytes:
 
 
 def _list(model, relative: str) -> list[str]:
+    """List artifact files under ``relative``; an absent directory is empty.
+
+    Only a missing directory counts as empty. Any other listing error raises,
+    so a transient failure can never look like "no evaluations".
+    """
     import mlflow
+    from mlflow.exceptions import MlflowException
 
     try:
         entries = mlflow.artifacts.list_artifacts(f"{model.artifact_location.rstrip('/')}/{relative}")
-    except Exception:
-        return []
+    except MlflowException as error:
+        if error.error_code in {"RESOURCE_DOES_NOT_EXIST", "NOT_FOUND"}:
+            return []
+        raise
     names = []
     for entry in entries:
         if entry.is_dir:
@@ -114,19 +122,33 @@ def verify_model(client, s3, model_id: str, *, rehash_checkpoint: bool = True, _
 
 
 def _verify_dataset(s3, model, ref: Mapping[str, Any]) -> dict:
+    """Verify the MLflow copy of a dataset lineage against S3, then the chain."""
     dataset_id = ref["dataset_id"]
     copy = _download(model, f"lineage/datasets/{dataset_id}/dataset.json")
     lineage = parse_record(copy, expected_sha256=ref["lineage_sha256"], schema=DATASET_LINEAGE_SCHEMA)
+    units_payload = _download(model, f"lineage/datasets/{dataset_id}/units.jsonl")
+    return _verify_dataset_chain(s3, dataset_id, lineage, copy, units_payload)
+
+
+def verify_published_dataset(s3, *, lineage_uri: str, lineage_sha256: str) -> dict:
+    """Verify a published dataset's lineage chain from S3 alone."""
+    payload = _s3_bytes(s3, lineage_uri)
+    lineage = parse_record(payload, expected_sha256=lineage_sha256, schema=DATASET_LINEAGE_SCHEMA)
+    return _verify_dataset_chain(
+        s3, lineage["dataset_id"], lineage, payload, _s3_bytes(s3, lineage["units"]["uri"]),
+    )
+
+
+def _verify_dataset_chain(s3, dataset_id: str, lineage: Mapping[str, Any], payload: bytes, units_payload: bytes) -> dict:
     if lineage["dataset_id"] != dataset_id:
-        raise ValueError(f"dataset lineage copy is for {lineage['dataset_id']}, not {dataset_id}")
+        raise ValueError(f"dataset lineage is for {lineage['dataset_id']}, not {dataset_id}")
     units_uri = lineage["units"]["uri"]
     if not units_uri.endswith("/lineage/units.jsonl"):
         raise ValueError(f"{dataset_id}: unexpected units location {units_uri}")
     original_uri = units_uri[: -len("units.jsonl")] + "dataset.json"
-    if _s3_bytes(s3, original_uri) != copy:
-        raise ValueError(f"MLflow copy of {dataset_id} lineage differs from S3")
-    units_payload = _download(model, f"lineage/datasets/{dataset_id}/units.jsonl")
-    if sha256_bytes(units_payload) != lineage["units"]["sha256"] or _s3_bytes(s3, lineage["units"]["uri"]) != units_payload:
+    if _s3_bytes(s3, original_uri) != payload:
+        raise ValueError(f"lineage copy of {dataset_id} differs from S3")
+    if sha256_bytes(units_payload) != lineage["units"]["sha256"] or _s3_bytes(s3, units_uri) != units_payload:
         raise ValueError(f"{dataset_id}: units.jsonl differs from its lineage digest")
     units = read_units_jsonl(units_payload)
     if sha256_bytes(canonical_json_bytes(lineage["spec"])) != dataset_id:
@@ -137,6 +159,10 @@ def _verify_dataset(s3, model, ref: Mapping[str, Any]) -> dict:
         raise ValueError(f"{dataset_id}: raw snapshot manifest changed")
     snapshot = json.loads(manifest)
     tar_digests = {u["unit_id"]: u["tar_sha256"] for u in snapshot.get("units", [])}
+    bucket = units_uri.split("/")[2]
+    views_key = lineage["views"]["key"]
+    if sha256_bytes(s3.get_object(Bucket=bucket, Key=views_key)["Body"].read()) != lineage["views"]["sha256"]:
+        raise ValueError(f"{dataset_id}: partition views manifest changed")
     labels_checked = 0
     for unit in units:
         if tar_digests and tar_digests.get(unit.unit_id) != unit.raw_tar_sha256:
@@ -145,7 +171,6 @@ def _verify_dataset(s3, model, ref: Mapping[str, Any]) -> dict:
             from Platform.pipelines.autoe2e_dataset import AutoE2EDataset
             from Platform.pipelines.autoe2e_labels import label_record_key
 
-            bucket = lineage["units"]["uri"].split("/")[2]
             key = label_record_key(AutoE2EDataset(lineage["spec"]["dataset"]), unit.label_id)
             if sha256_bytes(s3.get_object(Bucket=bucket, Key=key)["Body"].read()) != unit.label_record_sha256:
                 raise ValueError(f"{dataset_id}: label record of {unit.unit_id} changed")
