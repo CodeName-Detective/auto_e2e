@@ -108,22 +108,30 @@ behind the `Dataset` value inside tasks, not in the workflow signature.
 
 ### 4.1 Resolve dataset
 
-`dataset_id` is the SHA-256 of the canonical JSON of `DatasetSpec`. The
-resolver task looks for
-`s3://<datasets_bucket>/<dataset>/<dataset_id>/shards/manifest.json`.
+`dataset_id` is the SHA-256 of the canonical JSON of `DatasetSpec`
+(`Platform/pipelines/autoe2e_dataset.py`). Publications keep the
+`<dataset>/vN.M/` layout, because the Console discovers datasets only through
+version directories. After the manifest gate is written, the pipeline adds a
+write-once index object `s3://<datasets_bucket>/<dataset>/by-id/<dataset_id>.json`
+that records the canonical spec, the version, and the manifest key and
+SHA-256. The Console ignores `by-id/` because it is not a version directory.
 
-A publication is valid only if all of these hold:
+The resolver task (`resolve_dataset` in `Platform/pipelines/autoe2e_tasks.py`)
+reads that index. A publication is reused only if all of these hold:
 
-- the manifest exists and its SHA-256 matches the value in
-  `.publication-lock.json`;
-- the manifest's recorded `DatasetSpec` equals the requested one;
-- every listed shard object exists with the recorded size.
+- the index's spec and id equal the requested ones;
+- the manifest's SHA-256 matches both the index and `.publication-lock.json`;
+- the manifest is `ready` and names the same dataset and version;
+- every listed shard object exists with the recorded size and ETag.
 
-If the publication is valid, the task returns a `DatasetHandle` (dataset id,
-manifest URI, manifest SHA-256, shard URIs, validation split) and the build
-stage is skipped through a Flyte `conditional`. If a lock exists but the
-manifest does not, another execution is building the same dataset. The task
-fails with a clear message instead of building a second copy.
+If the index is valid, the task returns a `DatasetHandle` with
+`published=True` and the shard URIs, and the build stage is skipped through a
+Flyte `conditional`. If no index exists, it returns `published=False` and the
+next minor version after the newest version directory, which the build stage
+publishes under. Any validation failure fails the execution rather than
+falling back to a rebuild. Two executions that build the same new spec
+concurrently cannot both publish: the second one fails at the write-once
+manifest or index.
 
 For KITScenes, `split_manifest` points at the frozen recovery manifest
 (schema `kitscenes_recovery_manifest_v1`, 533 entries, 1 missing scene). The
@@ -143,7 +151,8 @@ This stage reuses the existing tasks:
 | nuPlan | `acquire_nuplan_archive` via `_acquire_nuplan_raw_snapshot`, scene pack |
 
 Then it calls `publish_dataset_partition` and `finalize_dataset_publication`
-under the `dataset_id` prefix. Per-partition Flyte cache stays enabled, so a
+under the allocated version, and `record_dataset_index` writes the by-id
+index and re-resolves the result through the same validation. Per-partition Flyte cache stays enabled, so a
 failed build resumes from finished partitions.
 
 ### 4.3 Resolve parent
