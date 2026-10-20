@@ -54,6 +54,9 @@ class _Client:
     def get_logged_model(self, model_id):
         return self.models[model_id]
 
+    def set_logged_model_tags(self, model_id, tags):
+        self.models[model_id].tags.update(tags)
+
     def create_registered_model(self, name):
         from mlflow.exceptions import MlflowException
 
@@ -148,6 +151,7 @@ def test_version_points_at_the_logged_model_and_is_reused():
     assert ensure_version(client, model=model, run_id="run-1") == "1"
     version = client.versions[0]
     assert version.source == f"models:/{model.model_id}"
+    assert json.loads(model.tags["mlflow.modelVersions"]) == [{"name": REGISTERED_MODEL, "version": "1"}]
     assert version.tags["checkpoint_sha256"] == H("c")
     assert REGISTERED_MODEL in client.registered
 
