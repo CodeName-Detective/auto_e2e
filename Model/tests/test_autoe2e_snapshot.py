@@ -143,7 +143,7 @@ def test_index_rejects_duplicate_names():
 class _RangeS3:
     def __init__(self, payload: bytes):
         self.payload = payload
-        self.ranges = []
+        self.ranges: list[tuple[int, int]] = []
 
     def get_object(self, *, Bucket, Key, Range):
         start, end = (int(x) for x in Range.removeprefix("bytes=").split("-"))
