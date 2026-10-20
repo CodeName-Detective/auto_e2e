@@ -1,235 +1,39 @@
-# How to Use MLflow — AutoE2E Experiment Tracking Guide
+# How to Use MLflow
 
-A practical, screen-by-screen guide to the MLflow UI for the AutoE2E training
-platform. Organized by **what you want to do**.
+Every `wf_autoe2e` run lands in the experiment `auto-e2e`. Read a checkpoint
+on its **LoggedModel page** (Experiment → Models → the model), not on a run:
+MLflow 3 shows params, dataset-tied metrics, datasets, runs, versions, and
+artifacts there.
 
-- **MLflow UI**: https://d33520viyb0smg.cloudfront.net/ (no login required)
-- Metrics are written **only by the evaluation tasks** (`evaluate_il_policy`,
-  `evaluate_rl_policy`), so every run already contains the full train→eval picture.
+## What is where
 
-> Flyte tells you **whether a run executed**; MLflow tells you **how good the model is**.
-> For launching pipelines see `HowToUseFlyte.md`.
+| Object | Holds |
+|---|---|
+| Training run | training curves, system metrics, the training dataset input, the parent model input, and the produced models as outputs |
+| Evaluation run | the evaluated model and the evaluation dataset as inputs |
+| LoggedModel (`best`, `final` if different, or `imported`) | params with every lineage digest and the flattened specs; metrics measured on named datasets; artifacts `lineage/checkpoint.json`, `lineage/datasets/<dataset_id>/{dataset.json,units.jsonl}`, `evaluations/<suite>@<dataset>/<dataset_id>.json`; a generated description linking the parent |
+| Registry version of `auto-e2e-driving-policy` | `source = models:/<model_id>` plus the identity tags (`checkpoint_sha256`, `lineage_sha256`, `dataset_id`, `stage_index`, …) for filtering |
 
----
+Params, not tags, carry the digests, because the LoggedModel page does not
+display tags. The OSS registry has no `model_id` column, so a version reaches
+its LoggedModel only through its `source`.
 
-## 0. Layout overview
+## Answering common questions
 
-When you open MLflow you land on the **Experiments** page. Left sidebar lists
-experiments; the main panel shows the runs of the selected experiment.
+| Question | Where |
+|---|---|
+| What data trained this checkpoint? | params `dataset_id`, `dataset.*`; artifact `lineage/datasets/<dataset_id>/dataset.json` |
+| Which raw bytes and labels? | `dataset.json` `raw` and `labels`; `units.jsonl` lists every unit's tar digest and label record |
+| What was it initialized from? | param `parent_model_id` and the description link, recursively |
+| How did it score, and on what? | the Metrics table: each row names its dataset (`name/version`, digest) and the run that measured it |
+| Is the chain intact? | every `wf_autoe2e` run ends with `verify_lineage`; it can also be run by hand from `Platform/pipelines/autoe2e_verify.py` |
 
-The experiments that matter:
+## Rules
 
-| Experiment | Written by | Contains |
-|------------|-----------|----------|
-| **`imitation-learning`** | `evaluate_il_policy` | IL-trained policies + their eval metrics |
-| **`offline-rl`** | `evaluate_rl_policy` | IQL-refined policies + their eval metrics |
-| **`reactive-training`** | Reactive Ray training task | Multi-task epoch history and checkpoint lineage |
-| **`reactive-bev-evaluation`** | `evaluate_reactive_bev_checkpoint` | Class-level BEV validation and registered BEV checkpoints |
-| **`reactive-policy-evaluation`** | `publish_reactive_kitscenes_evaluation` | Reactive KITScenes policy evaluation reports |
-| `Default` | — | empty / unused |
-
-There is also a **Models** tab (top nav) for the Model Registry
-(`auto-e2e-driving-policy` and `auto-e2e-bev-segmentation`).
-
----
-
-## Core concepts (30-second version)
-
-| Term | What it is |
-|------|------------|
-| **Experiment** | A named bucket of runs (e.g. `imitation-learning`) |
-| **Run** | One evaluated model: its params, metrics, artifacts |
-| **Param** | A fixed input value (backbone, lr, dataset…) — filterable |
-| **Metric** | A measured value, possibly per-step (train loss, ADE, FDE) |
-| **Artifact** | A file saved with the run (checkpoint, `config.yaml`) |
-| **Registered Model** | A versioned model in the Model Registry |
-
----
-
-## What every run records
-
-Each evaluation run logs a consistent schema, so runs are directly comparable:
-
-**Params** (single values, filterable / sortable):
-```
-data/dataset              e.g. yaak-ai/L2D
-model/backbone            e.g. swin_v2_tiny
-model/fusion_mode         always bev
-train/epochs, train/batch_size, train/lr, train/weight_decay, train/amp
-train/final_loss
-rl/method, rl/tau, rl/beta, rl/epochs            (offline-rl runs only)
-ctx/train_execution_id    Flyte execution that produced the checkpoint
-ctx/train_docker_image    exact training image
-ctx/eval_execution_id, ctx/eval_docker_image
-```
-
-**Metrics**:
-```
-train/loss        per-epoch training loss curve (step = epoch)
-eval/ade          Scene-balanced logged-XY ADE@3s (meters, lower is better)
-eval/fde          Scene-balanced logged-XY FDE@3s (meters, lower is better)
-eval/gate_pass    1.0 if ade<2.0 AND fde<4.0 else 0.0
-rl/q_loss, rl/v_loss, rl/policy_loss             (offline-rl runs only)
-```
-
-**Artifacts**:
-```
-config.yaml       full nested config (data+model+training+context) for exact reproduction
-model/            the checkpoint (.pt), also registered in the Model Registry
-```
-
----
-
-## Use case A — "Which model is the best?"
-
-**You are**: anyone choosing a model to promote.
-
-1. Open the **`imitation-learning`** experiment.
-2. For selector-v3 runs, sort `selection/score` descending to find the
-   composite-best epoch. Use `eval/ade` and `eval/fde` to inspect the selected
-   checkpoint's 3-second displacement quality.
-3. Add/show the columns you care about (gear/columns button): `model/backbone`,
-   `model/fusion_mode`, `data/dataset`, `eval/ade`, `eval/fde`, `eval/gate_pass`.
-4. The top row is your best IL model. Repeat in **`offline-rl`** to see if RL
-   refinement improved it.
-
-> Lower `eval/ade` and `eval/fde` are better. For KITScenes selector-v3 runs,
-> both use logged XY, a 3-second horizon, and equal scene weighting. Confirm
-> `validation_metric_*` tags before comparing older runs.
-
----
-
-## Use case B — "Compare a few candidate runs side by side"
-
-**You are**: comparing backbones or hyperparameters.
-
-1. In the experiment run table, tick the **checkboxes** of 2–5 runs.
-2. Click **Compare**.
-3. The compare view shows:
-   - A **parameter table** (differing params highlighted) — instantly see what changed.
-   - **Metric charts** — `train/loss` curves overlaid, plus bar charts for `eval/ade` / `eval/fde`.
-4. Use this to answer "did `conv_next_v2_tiny` beat `swin_v2_tiny`?" or "did a lower `lr` help?".
-
----
-
-## Use case C — "Filter runs by configuration"
-
-**You are**: looking for all runs of a specific setup.
-
-1. In the run table, use the **search bar** with MLflow's filter syntax:
-   ```
-   params.`model/backbone` = "swin_v2_tiny"
-   params.`data/dataset` = "yaak-ai/L2D" and metrics.`eval/ade` < 2.0
-   params.`train/lr` = "0.0001"
-   ```
-   (Backtick the keys that contain `/`.)
-2. Sort and column-pick as in Use case A.
-
----
-
-## Use case D — "Inspect one run in depth"
-
-**You are**: auditing or reproducing a specific result.
-
-1. Click the run name to open the **run detail page**.
-2. **Parameters** section: every input (data, model, training, rl, context).
-3. **Metrics** section: click `train/loss` to see the **per-epoch curve**; `eval/*`
-   show final values.
-4. **Artifacts** section:
-   - `config.yaml` — download to reproduce the exact run.
-   - `model/` — the checkpoint.
-5. **Provenance**: the `ctx/train_execution_id` param links back to the Flyte
-   execution that trained this model (paste it into the Flyte Executions search).
-
----
-
-## Use case E — "Did Offline RL actually improve the model?"
-
-**You are**: validating the RL refinement step.
-
-1. Note the IL run's `eval/ade` in the **`imitation-learning`** experiment.
-2. Open the matching run in **`offline-rl`** (same backbone/dataset; the
-   `base/*` or `ctx/*` params link them).
-3. Compare `eval/ade` / `eval/fde`: a lower value in the offline-rl run means IQL
-   refinement helped. (With only a few epochs the absolute numbers are high; what
-   matters is IL-vs-RL relative improvement.)
-
----
-
-## Use case F — "Manage models for deployment" (Model Registry)
-
-**You are**: promoting a model toward production.
-
-1. Top nav → **Models**.
-2. Open **`auto-e2e-driving-policy`** — every evaluated checkpoint is registered as
-   a new **version** here.
-   Reactive BEV-only checkpoints are stored separately under
-   **`auto-e2e-bev-segmentation`**.
-3. For a version you can:
-   - View its **source run** (links back to the experiment run with all metrics).
-   - Add a **description** / tags.
-   - (When stages are enabled) transition it through Staging → Production.
-4. To fetch a specific model programmatically:
-   ```python
-   import mlflow
-   mlflow.set_tracking_uri("http://mlflow.mlflow.svc.cluster.local:5000")  # in-cluster
-   model_uri = "models:/auto-e2e-driving-policy/<version>"
-   local = mlflow.artifacts.download_artifacts(model_uri)
-   ```
-
----
-
-## Use case G — "Track training progress live"
-
-**You are**: watching a run that is still training.
-
-- Legacy IL and Offline-RL runs are consolidated by the **evaluation** task,
-  which runs **after** training.
-- Reactive Ray training creates a `reactive-training` MLflow run before GPU
-  training begins. On success it logs every epoch from the Ray history. On
-  failure it recovers the latest S3 checkpoint history before setting the run
-  status to `FAILED`.
-- To watch training epoch-by-epoch **as it happens**, use the **Flyte** task logs
-  (see `HowToUseFlyte.md`, Use case F). MLflow is for the consolidated post-run view.
-
----
-
-## Reading the metrics
-
-| Metric | Meaning | Good value |
-|--------|---------|-----------|
-| `eval/ade` | scene-balanced logged-XY mean error through 3.0s (m) | lower; <2.0 passes gate |
-| `eval/fde` | scene-balanced logged-XY endpoint error at 3.0s (m) | lower; <4.0 passes gate |
-| `eval/gate_pass` | 1.0 if both gates pass | 1.0 |
-| `train/loss` | smooth-L1 trajectory loss per epoch | decreasing & flattening |
-| `rl/q_loss`,`rl/v_loss`,`rl/policy_loss` | IQL component losses | decreasing |
-
-> Predicted `(accel, curvature)` is integrated into XY and compared with packed
-> logged XY. The model still predicts and trains over 64 steps; canonical
-> validation uses the first 30 steps.
-
----
-
-## Tips
-
-- **One run = full story**: because only the eval task logs, each run already bundles
-  the training params, loss curve, eval metrics, config, and checkpoint. No need to
-  cross-reference a separate "training run".
-- **Backtick slashed keys** in the search bar: ``params.`model/backbone` = "…"``.
-- **Compare is your friend** for ablations — select runs, hit Compare.
-- **Provenance is built in**: `ctx/*` params tie each run to its Flyte execution and
-  Docker image, so any result is fully traceable and reproducible.
-
----
-
-## Quick reference: goal → where to look
-
-| Goal | Where |
-|------|-------|
-| Pick the best model | experiment → sort by `eval/ade` |
-| Compare configs | select runs → **Compare** |
-| Find runs of a setup | search bar filter on `params.*` |
-| Reproduce a run | run detail → `config.yaml` artifact |
-| Verify RL improvement | compare IL run vs offline-rl run `eval/ade` |
-| Deploy a model | **Models** → `auto-e2e-driving-policy` |
-| Watch live training | (Flyte logs, not MLflow) |
+- One set of weights gets one LoggedModel and one version, across all runs.
+  Registration finds an existing model by `checkpoint_sha256`.
+- Evaluations are added, never rewritten. A later evaluation on another
+  dataset version becomes another metric row with its own dataset.
+- An evaluation is recorded only if the model was re-executed on the data.
+- Clean up probes by id. `mlflow gc` without `--run-ids` permanently deletes
+  every soft-deleted run on the server, not only one experiment.
