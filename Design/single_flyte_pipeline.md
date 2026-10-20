@@ -375,7 +375,7 @@ records, and no earlier record is rewritten.
 |---|---|
 | `unit_id` | scene, archive, or episode id |
 | `partition_id` | pack partition that consumed the unit |
-| `raw_tar_key`, `raw_tar_sha256`, `raw_index_sha256` | from the raw snapshot manifest |
+| `raw_tar_key`, `raw_tar_digest`, `raw_index_sha256` | from the raw snapshot manifest; the digest is `sha256:<hex>` for tars this code wrote and `crc64nvme:<base64>` for the S3-copied nuPlan archives, which have no member index (`raw_index_sha256` is `null`) |
 | `label_id`, `label_record_sha256` | null for a dataset without labels |
 | `label_origin` | `reused` or `created` in this build |
 | `sample_count`, `label_count` | contribution of the unit to the published shards |
