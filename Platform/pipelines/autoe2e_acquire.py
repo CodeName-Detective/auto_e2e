@@ -256,7 +256,14 @@ def acquire_unit_from_hub(
 
     work = Path(tempfile.mkdtemp(prefix="autoe2e-acquire-"))
     root = work / "tree"
-    downloader = PinnedKITScenesDownloader(root, revision=revision, token=os.environ.get("HF_TOKEN") or None)
+    from flytekit import current_context
+
+    # Flyte mounts the secret under its own variable name, not HF_TOKEN.
+    try:
+        token = current_context().secrets.get("hf-token", "HF_TOKEN")
+    except Exception:
+        token = os.environ.get("HF_TOKEN", "")
+    downloader = PinnedKITScenesDownloader(root, revision=revision, token=token or None)
     downloader.download([source.unit_id], expected_split=split)
     for leftover in (".kitscenes_staging", ".cache"):
         shutil.rmtree(root / leftover, ignore_errors=True)
