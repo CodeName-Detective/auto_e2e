@@ -2,7 +2,7 @@
 
 Three write-once records, each canonical JSON identified by its SHA-256:
 
-- dataset lineage: one per published dataset, with a ``units.parquet`` row
+- dataset lineage: one per published dataset, with a ``units.jsonl`` line
   per unit naming its raw tar and label record;
 - checkpoint lineage: one per distinct checkpoint, naming its dataset
   lineage and its parent checkpoint lineage;
@@ -14,10 +14,10 @@ upstream breaks every digest downstream.
 
 from __future__ import annotations
 
-import io
 import json
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Optional, Sequence
 
 from Platform.pipelines.dataset_publication import canonical_json_bytes, sha256_bytes
@@ -28,7 +28,7 @@ CHECKPOINT_LINEAGE_SCHEMA = "autoe2e_checkpoint_lineage_v1"
 EVALUATION_SCHEMA = "autoe2e_evaluation_v1"
 UNKNOWN = {"status": "unknown"}
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_UNIT_COLUMNS = (
+_UNIT_FIELDS = (
     "unit_id",
     "partition_id",
     "raw_tar_key",
@@ -70,11 +70,12 @@ class UnitLineage:
     label_count: int
 
 
-def units_parquet(units: Sequence[UnitLineage]) -> bytes:
-    """Serialize unit rows deterministically, sorted by unit id."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+def units_jsonl(units: Sequence[UnitLineage]) -> bytes:
+    """Serialize unit rows as canonical JSON Lines sorted by unit id.
 
+    JSON Lines, not Parquet, so the bytes never depend on a library version
+    and a write-once rerun reproduces them exactly.
+    """
     rows = sorted(units, key=lambda unit: unit.unit_id)
     ids = [unit.unit_id for unit in rows]
     if not ids or len(set(ids)) != len(ids):
@@ -94,31 +95,19 @@ def units_parquet(units: Sequence[UnitLineage]) -> bytes:
                 raise ValueError(f"{unit.unit_id}: invalid label_origin")
         if unit.sample_count < 0 or unit.label_count < 0:
             raise ValueError(f"{unit.unit_id}: counts must not be negative")
-    table = pa.table({
-        "unit_id": pa.array(ids, pa.string()),
-        "partition_id": pa.array([u.partition_id for u in rows], pa.string()),
-        "raw_tar_key": pa.array([u.raw_tar_key for u in rows], pa.string()),
-        "raw_tar_sha256": pa.array([u.raw_tar_sha256 for u in rows], pa.string()),
-        "raw_index_sha256": pa.array([u.raw_index_sha256 for u in rows], pa.string()),
-        "label_id": pa.array([u.label_id for u in rows], pa.string()),
-        "label_record_sha256": pa.array([u.label_record_sha256 for u in rows], pa.string()),
-        "label_origin": pa.array([u.label_origin for u in rows], pa.string()),
-        "sample_count": pa.array([u.sample_count for u in rows], pa.int64()),
-        "label_count": pa.array([u.label_count for u in rows], pa.int64()),
-    })
-    out = io.BytesIO()
-    pq.write_table(table, out, compression="zstd", write_statistics=False, store_schema=False)
-    return out.getvalue()
+    return b"".join(canonical_json_bytes(asdict(unit)) + b"\n" for unit in rows)
 
 
-def read_units_parquet(payload: bytes) -> list[UnitLineage]:
-    import pyarrow.parquet as pq
-
-    table = pq.read_table(io.BytesIO(payload))
-    if tuple(table.column_names) != _UNIT_COLUMNS:
-        raise ValueError(f"units columns {table.column_names} != {_UNIT_COLUMNS}")
-    rows = table.to_pylist()
-    return [UnitLineage(**row) for row in rows]
+def read_units_jsonl(payload: bytes) -> list[UnitLineage]:
+    units = []
+    for line in payload.splitlines():
+        row = json.loads(line)
+        if tuple(sorted(row)) != tuple(sorted(_UNIT_FIELDS)):
+            raise ValueError(f"unit row fields {sorted(row)} != {sorted(_UNIT_FIELDS)}")
+        units.append(UnitLineage(**row))
+    if units_jsonl(units) != payload:
+        raise ValueError("units.jsonl is not canonical")
+    return units
 
 
 def dataset_lineage(
@@ -133,13 +122,15 @@ def dataset_lineage(
     pack: Mapping[str, Any],
     build: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bytes]:
-    """Return ``(dataset.json record, units.parquet bytes)``."""
+    """Return ``(dataset.json record, units.jsonl bytes)``."""
     from Platform.pipelines.autoe2e_labels import label_set_sha256
 
     _sha(dataset_id, "dataset_id")
+    if sha256_bytes(canonical_json_bytes(dict(spec))) != dataset_id:
+        raise ValueError("dataset_id is not the digest of the given spec")
     _sha(published["manifest_sha256"], "published manifest_sha256")
     _sha(raw["snapshot_manifest_sha256"], "raw snapshot_manifest_sha256")
-    payload = units_parquet(units)
+    payload = units_jsonl(units)
     labelled = [u for u in units if u.label_id is not None]
     if labels is None:
         if labelled:
@@ -197,6 +188,8 @@ def checkpoint_lineage(
         raise ValueError("an imported checkpoint has unknown dataset, split, and training")
     if not imported and any(value is None for value in known):
         raise ValueError("a trained checkpoint needs dataset, split, and training")
+    if imported and parent is not None:
+        raise ValueError("an imported checkpoint has no known parent")
     if parent is not None:
         _sha(parent["checkpoint_sha256"], "parent checkpoint_sha256")
         _sha(parent["lineage_sha256"], "parent lineage_sha256")
@@ -238,7 +231,11 @@ def evaluation_record(
     if not metrics:
         raise ValueError("an evaluation needs at least one metric")
     for name, value in metrics.items():
-        if not isinstance(value, (int, float)) or value != value:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
             raise ValueError(f"metric {name} is not a finite number")
     return {
         "schema_version": EVALUATION_SCHEMA,
