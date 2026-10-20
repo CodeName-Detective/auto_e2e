@@ -15,7 +15,6 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 from Platform.pipelines.dataset_publication import (
-    PUBLICATION_SCHEMA,
     canonical_json_bytes,
     dataset_prefix,
     sha256_bytes,
@@ -176,20 +175,56 @@ def next_dataset_version(existing_versions: Iterable[str]) -> str:
     return f"v{major}.{minor + 1}"
 
 
+VIEWS_SCHEMA = "autoe2e_partition_views_v1"
+
+
+def views_manifest_key(published_name: str, version: str) -> str:
+    return f"{dataset_prefix(published_name, version)}/partitions/manifest.json"
+
+
+def views_manifest(
+    *,
+    dataset_id: str,
+    published_name: str,
+    version: str,
+    contracts: Mapping[str, Any],
+    image_size: int,
+    partitions: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The reuse gate: every training partition view and its manifest digest."""
+    ordered = sorted((dict(p) for p in partitions), key=lambda p: p["partition_id"])
+    ids = [p["partition_id"] for p in ordered]
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("partition views must be non-empty and unique")
+    for partition in ordered:
+        if set(partition) != {"partition_id", "prefix", "manifest_sha256", "sample_count"}:
+            raise ValueError(f"partition view {partition['partition_id']} has unexpected fields")
+        if partition["prefix"] != partition_view_prefix(published_name, version, partition["partition_id"]):
+            raise ValueError(f"partition view {partition['partition_id']} is outside the publication")
+        if not _SHA256_RE.fullmatch(partition["manifest_sha256"]):
+            raise ValueError(f"partition view {partition['partition_id']} has an invalid digest")
+    return {
+        "schema_version": VIEWS_SCHEMA,
+        "dataset_id": dataset_id,
+        "published_name": published_name,
+        "version": version,
+        "contracts": dict(contracts),
+        "image_size": int(image_size),
+        "partitions": ordered,
+        "samples": sum(int(p["sample_count"]) for p in ordered),
+    }
+
+
 def dataset_index_record(
     spec: DatasetSpec,
     *,
     published_name: str,
     version: str,
-    manifest_key: str,
-    manifest_sha256: str,
+    views_sha256: str,
     lineage_sha256: str,
 ) -> dict[str, Any]:
     canonical = canonical_dataset_spec(spec)
-    expected_key = f"{dataset_prefix(published_name, version)}/shards/manifest.json"
-    if manifest_key != expected_key:
-        raise ValueError(f"manifest key {manifest_key!r} is not {expected_key!r}")
-    for name, digest in (("manifest_sha256", manifest_sha256), ("lineage_sha256", lineage_sha256)):
+    for name, digest in (("views_sha256", views_sha256), ("lineage_sha256", lineage_sha256)):
         if not _SHA256_RE.fullmatch(digest):
             raise ValueError(f"{name} must be 64 lowercase hex digits")
     return {
@@ -198,8 +233,8 @@ def dataset_index_record(
         "spec": canonical,
         "published_name": published_name,
         "version": version,
-        "manifest_key": manifest_key,
-        "manifest_sha256": manifest_sha256,
+        "views_key": views_manifest_key(published_name, version),
+        "views_sha256": views_sha256,
         "lineage_key": lineage_key(published_name, version),
         "lineage_sha256": lineage_sha256,
     }
@@ -223,49 +258,41 @@ def validate_dataset_index_record(
         spec,
         published_name=published_name,
         version=str(record.get("version")),
-        manifest_key=str(record.get("manifest_key")),
-        manifest_sha256=str(record.get("manifest_sha256")),
+        views_sha256=str(record.get("views_sha256")),
         lineage_sha256=str(record.get("lineage_sha256")),
     )
     if dict(record) != expected:
         raise ValueError("dataset index record has unexpected fields")
 
 
-def validate_publication(
+def validate_views(
     record: Mapping[str, Any],
     *,
-    lock: Mapping[str, Any],
-    manifest_payload: bytes,
+    views_payload: bytes,
     expected_contracts: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Check the lock and manifest bytes against an index record.
+    """Check the partition views manifest against the index and running code.
 
-    ``expected_contracts`` are the pack contracts of the running code, so a
-    publication packed under older contracts is never reused. Returns the
-    parsed manifest. Shard existence is checked by the caller.
+    A publication packed under other contracts or another image size is
+    never reused. Returns the parsed views manifest.
     """
-    if lock.get("schema_version") != PUBLICATION_SCHEMA:
-        raise ValueError("unsupported publication lock schema")
-    actual_sha256 = sha256_bytes(manifest_payload)
-    if lock.get("manifest_sha256") != actual_sha256:
-        raise ValueError("publication lock does not match the manifest bytes")
-    if record["manifest_sha256"] != actual_sha256:
-        raise ValueError("dataset index does not match the manifest bytes")
-    manifest = json.loads(manifest_payload)
-    if manifest.get("status") != "ready":
-        raise ValueError("published manifest is not ready")
-    if manifest.get("dataset") != record["published_name"]:
-        raise ValueError("published manifest dataset differs from the index")
-    if manifest.get("version") != record["version"]:
-        raise ValueError("published manifest version differs from the index")
-    if manifest.get("contracts") != dict(expected_contracts):
-        raise ValueError("published manifest was packed under other contracts")
-    if int(manifest.get("image_size", -1)) != int(record["spec"]["image_size"]):
-        raise ValueError("published manifest image size differs from the spec")
-    entries = manifest.get("shard_entries") or []
-    if not entries or len(entries) != manifest.get("shard_count"):
-        raise ValueError("published manifest shard entries are incomplete")
-    for entry in entries:
-        if not entry.get("etag"):
-            raise ValueError(f"shard entry {entry.get('name')!r} has no ETag")
-    return manifest
+    if sha256_bytes(views_payload) != record["views_sha256"]:
+        raise ValueError("partition views manifest differs from the index")
+    views = json.loads(views_payload)
+    if views.get("schema_version") != VIEWS_SCHEMA:
+        raise ValueError("unsupported partition views schema")
+    rebuilt = views_manifest(
+        dataset_id=record["dataset_id"],
+        published_name=record["published_name"],
+        version=record["version"],
+        contracts=views["contracts"],
+        image_size=views["image_size"],
+        partitions=views["partitions"],
+    )
+    if canonical_json_bytes(rebuilt) != views_payload:
+        raise ValueError("partition views manifest is not canonical")
+    if views["contracts"] != dict(expected_contracts):
+        raise ValueError("publication was packed under other contracts")
+    if int(views["image_size"]) != int(record["spec"]["image_size"]):
+        raise ValueError("publication image size differs from the spec")
+    return views
