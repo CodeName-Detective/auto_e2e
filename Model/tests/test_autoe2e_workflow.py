@@ -153,3 +153,28 @@ def test_every_dynamic_carries_the_registration_environment():
     }
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
+    from flytekit.configuration import ImageConfig, SerializationSettings
+    from flytekit.core.context_manager import ExecutionState, FlyteContextManager
+
+    import Platform.pipelines.autoe2e as wf
+    from Platform.pipelines.autoe2e_store import DatasetHandle
+
+    monkeypatch.setattr(wf, "console_manifest_sha256", lambda s3, dataset, runtime: "m" * 64)
+    monkeypatch.setattr(wf, "_s3", lambda: None)
+    handle = DatasetHandle("d" * 64, "kitscenes", "v3.7", True, "exec", partition_uris=["s3://d/p0/", "s3://d/p1/"])
+    trained = wf.TrainedCheckpoints(trained=True, run_id="r" * 32, best_sha256="c" * 64)
+    models = [wf.RegisteredModel("best", "m-1", "71", "s3://c/x.pt", "c" * 64, "l" * 64)]
+    settings = SerializationSettings(image_config=ImageConfig.auto_default_image())
+    ctx = FlyteContextManager.current_context()
+    state = ctx.execution_state.with_params(mode=ExecutionState.Mode.TASK_EXECUTION)
+    with FlyteContextManager.with_context(ctx.with_serialization_settings(settings).with_execution_state(state)) as compiled:
+        spec = wf.publish_overlays.compile_into_workflow(
+            compiled, wf.publish_overlays._task_function, models=models, trained=trained,
+            training=wf.TrainingSpec(), dataset=handle,
+            runtime=wf.RuntimeOptions(datasets_bucket="d", artifacts_bucket="a"),
+        )
+    names = sorted(node.id for node in spec.nodes)
+    assert len(names) == 4
