@@ -22,15 +22,16 @@ KITSCENES_UPSTREAM = "KIT-MRT/KITScenes-Multimodal"
 L2D_UPSTREAM = "yaak-ai/L2D"
 NUPLAN_SNAPSHOT_SCHEMA = "nuplan_raw_snapshot_v1"
 _KITSCENES_SPLIT_NAMES = {"train": "kitscenes", "val": "kitscenes-val", "test": "kitscenes-test"}
-_NUPLAN_PACK_PARAMS = {"total_scenario_limit", "samples_per_shard", "max_rejection_fraction"}
+_NUPLAN_PACK_PARAMS = {"total_scenario_limit", "samples_per_shard", "max_rejection_fraction", "group_limit"}
 _NUPLAN_PACK_DEFAULTS = {
+    "group_limit": "0",
     "total_scenario_limit": "131072",
     "samples_per_shard": "100",
     "max_rejection_fraction": "0.25",
 }
 # Must equal the cache_version of pack_nuplan_snapshot_reactive_dataset; a test
 # pins the two together so a nuPlan pack change always changes dataset_id.
-NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v13-manifest-v10"
+NUPLAN_PACK_TASK_VERSION = "nuplan-snapshot-pack-v13-manifest-v11"
 
 
 def pack_contracts() -> dict[str, str]:
@@ -194,6 +195,7 @@ def read_nuplan(spec: DatasetSpec, payload: bytes) -> SourcePlan:
         raise ValueError("nuPlan partitions are sensor groups; unit_limit is not supported")
     _int_param(spec.pack_params, "total_scenario_limit", 131_072, minimum=1)
     _int_param(spec.pack_params, "samples_per_shard", 100, minimum=1)
+    _int_param(spec.pack_params, "group_limit", 0, minimum=0)
     fraction = float(spec.pack_params["max_rejection_fraction"])
     if not 0.0 <= fraction < 1.0:
         raise ValueError("max_rejection_fraction must be in [0, 1)")
