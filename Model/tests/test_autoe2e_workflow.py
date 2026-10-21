@@ -164,6 +164,7 @@ def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
 
     monkeypatch.setattr(wf, "console_manifest_sha256", lambda s3, dataset, runtime: "m" * 64)
     monkeypatch.setattr(wf, "_s3", lambda: None)
+    monkeypatch.setattr(wf, "nonempty_partition_uris", lambda s3, dataset, runtime: dataset.partition_uris)
     from Platform.pipelines import reproducibility
 
     monkeypatch.setattr(reproducibility, "container_digest_from_image", lambda image: "sha256:" + "e" * 64)
