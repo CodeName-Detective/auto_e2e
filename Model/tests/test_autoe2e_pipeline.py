@@ -295,3 +295,15 @@ def test_overlays_need_a_console_publication(monkeypatch):
         monkeypatch.setattr(autoe2e_store, "read_dataset_lineage",
                             lambda s3, *, bucket, key, sha256, c=console: {"console": c})
         assert console_manifest_sha256(S3(), handle, runtime) == expected
+
+
+@pytest.mark.parametrize(("count", "workers", "sizes"), [(533, 16, [34] * 15 + [23]), (2, 16, [1, 1]), (5, 1, [5])])
+def test_overlay_chunks_cover_every_partition_once(count, workers, sizes):
+    from Platform.pipelines.autoe2e import overlay_chunks
+
+    uris = [f"s3://d/p{i:03d}/" for i in range(count)]
+    chunks = overlay_chunks(uris, workers)
+    assert [len(c) for c in chunks] == sizes
+    assert [u for c in chunks for u in c] == uris
+    with pytest.raises(ValueError, match="at least 1"):
+        overlay_chunks(uris, 0)
