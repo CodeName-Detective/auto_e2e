@@ -797,7 +797,8 @@ def overlay_metadata(*, model: RegisteredModel, run_id: str, dataset_source: str
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=PIPELINE_ENV, retries=2)
 def resolve_overlay_checkpoint(
     model: RegisteredModel,
-    trained: TrainedCheckpoints,
+    run_id: str,
+    metrics_json: str,
     training: TrainingSpec,
     dataset: DatasetHandle,
 ) -> ResolvedOverlayModel:
@@ -816,15 +817,42 @@ def resolve_overlay_checkpoint(
     if sha256_file(path) != model.checkpoint_sha256:
         raise RuntimeError(f"{model.checkpoint_uri} differs from its registered sha256")
     metadata = overlay_metadata(
-        model=model, run_id=trained.run_id,
+        model=model, run_id=run_id,
         # Precompute rejects a checkpoint whose training policy names another dataset.
         dataset_source=KITSCENES_DATASET_NAME,
         dataset_version=dataset.version, training=training,
-        metrics_json=trained.best_metrics_json, execution_id=_execution_id(),
+        metrics_json=metrics_json, execution_id=_execution_id(),
     )
     meta = root / "model-metadata.json"
     meta.write_text(json.dumps(metadata, indent=2, sort_keys=True))
     return ResolvedOverlayModel(checkpoint=FlyteFile(str(path)), metadata=FlyteFile(str(meta)))
+
+
+def overlay_source(client, models: List[RegisteredModel], trained: TrainedCheckpoints):
+    """The model to overlay, its Ray run, and its validation metrics, or None.
+
+    A training run overlays its ``best``. An ``epochs=0`` run overlays its
+    parent when the parent was trained by wf_autoe2e, reading the run and the
+    internal_val metrics from the parent's LoggedModel, so an existing model
+    can be put on a new Console dataset without retraining.
+    """
+    if trained.trained:
+        best = [m for m in models if m.role == "best"]
+        return (best[0], trained.run_id, trained.best_metrics_json) if best else None
+    parents = [m for m in models if m.role == "parent"]
+    if not parents:
+        return None
+    logged = client.get_logged_model(parents[0].model_id)
+    if not logged.source_run_id:
+        return None  # an imported checkpoint has no Ray validation
+    latest = {}
+    for metric in logged.metrics or []:
+        name = metric.key.rpartition("/")[2]
+        if metric.key.startswith("eval/internal_val/") and name in {"validation_ade_6p4s_m", "validation_fde_6p4s_m"}:
+            if name not in latest or metric.timestamp > latest[name].timestamp:
+                latest[name] = metric
+    metrics = {name: metric.value for name, metric in latest.items()}
+    return parents[0], logged.source_run_id, json.dumps(metrics, sort_keys=True)
 
 
 def overlay_chunks(uris: List[str], workers: int) -> List[List[str]]:
@@ -853,10 +881,11 @@ def publish_overlays(
     dataset: DatasetHandle,
     runtime: RuntimeOptions,
 ) -> None:
-    """Precompute the best model's overlays so the Console can show it.
+    """Precompute a model's overlays so the Console can show it.
 
     Overlays are keyed by checkpoint sha and the dataset's Console manifest,
-    so they exist only for trained KITScenes models on a Console publication.
+    so they exist only for wf_autoe2e-trained KITScenes models (the new
+    ``best``, or the parent of an ``epochs=0`` run) on a Console publication.
     """
     from Platform.pipelines.overlay_tasks import (
         EVAL_IMAGE,
@@ -870,15 +899,18 @@ def publish_overlays(
         preprocessing_contract_digest,
     )
 
-    best = [m for m in models if m.role == "best"]
-    if not (runtime.artifacts_bucket and trained.trained and best and dataset.published_name == "kitscenes"):
-        print("overlays skipped: no trained best model on the kitscenes publication")
+    source = overlay_source(_client(), models, trained) if runtime.artifacts_bucket else None
+    if source is None or dataset.published_name != "kitscenes":
+        print("overlays skipped: no wf_autoe2e-trained model on the kitscenes publication")
         return
+    model, run_id, metrics_json = source
     manifest_sha256 = console_manifest_sha256(_s3(), dataset, runtime)
     if not manifest_sha256:
         print(f"overlays skipped: {dataset.published_name}/{dataset.version} is not on the Console")
         return
-    resolved = resolve_overlay_checkpoint(model=best[0], trained=trained, training=training, dataset=dataset)
+    resolved = resolve_overlay_checkpoint(
+        model=model, run_id=run_id, metrics_json=metrics_json, training=training, dataset=dataset,
+    )
     common = dict(
         dataset=dataset.published_name, dataset_version=dataset.version,
         dataset_manifest_digest=manifest_sha256, artifacts_bucket=runtime.artifacts_bucket,
