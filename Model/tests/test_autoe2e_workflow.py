@@ -179,8 +179,8 @@ def test_publish_overlays_compiles_the_overlay_chain(monkeypatch):
             training=wf.TrainingSpec(), dataset=handle,
             runtime=wf.RuntimeOptions(datasets_bucket="d", artifacts_bucket="a"),
         )
-    names = sorted(node.id for node in spec.nodes)
-    assert len(names) == 4
+    # resolve, prepare, one precompute per partition (two here), finalize
+    assert len(spec.nodes) == 5
 
 
 def test_the_launcher_imports_both_workflows_without_torch():
