@@ -14,7 +14,6 @@ pytest.importorskip("flytekit")
 from Platform.pipelines.overlay_tasks import (
     OVERLAY_TASK_ENV,
     _gate_token,
-    _large_shm_pod_template,
     _metric_at_epoch,
     _overlay_schema_version,
     _parse_gate,
@@ -46,14 +45,14 @@ def test_overlay_tasks_configure_deterministic_cublas_workspace():
     assert OVERLAY_TASK_ENV["CUBLAS_WORKSPACE_CONFIG"] == ":4096:8"
 
 
-def test_overlay_gpu_tasks_target_validation_capacity():
-    pod_template = _large_shm_pod_template()
+def test_overlay_precompute_targets_the_overlay_pool():
+    pod_template = precompute_overlay_partition.pod_template
     pod_spec = pod_template.pod_spec
     assert pod_template.annotations == {
         "karpenter.sh/do-not-disrupt": "true"
     }
     assert pod_spec.node_selector == {
-        "workload-type": "gpu-validation"
+        "workload-type": "gpu-overlay"
     }
     assert [
         (
@@ -67,7 +66,7 @@ def test_overlay_gpu_tasks_target_validation_capacity():
         precompute_overlay_partition.metadata.labels[
             "kueue.x-k8s.io/queue-name"
         ]
-        == "gpu-validation"
+        == "gpu-overlay"
     )
 
 
