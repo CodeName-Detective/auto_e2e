@@ -4940,8 +4940,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             for evidence in kitscenes_rank_sampling_evidence
             if isinstance(evidence, Mapping)
         )
+        # The single-worker smoke stops after a few steps by design, so it
+        # reads almost nothing of the corpus; the evidence is still recorded.
         if (
-            maximum_truncation_fraction
+            not single_worker_smoke
+            and maximum_truncation_fraction
             > KITSCENES_MAX_RANK_TRUNCATION_FRACTION
         ):
             raise ValueError(
