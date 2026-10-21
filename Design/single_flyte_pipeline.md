@@ -266,10 +266,17 @@ Known gaps:
 | 5 | Evaluate every suite on every distinct checkpoint | — |
 | 6 | Register one model version per new distinct checkpoint | `epochs == 0` |
 | 7 | Verify lineage: `verify_lineage` recomputes every digest of the new models | — |
-| 8 | Precompute Console overlays for `best` on the training dataset | no trained `best`, the dataset is not `kitscenes`, it has no Console publication (`unit_limit > 0`), or `runtime.artifacts_bucket` is empty |
+| 8 | Precompute Console overlays on the training dataset for the new `best`, or for the parent of an `epochs=0` run | the dataset is not `kitscenes` or has no Console publication (`unit_limit > 0`), `runtime.artifacts_bucket` is empty, the run is a `ray_1` smoke, or the parent was not trained by wf_autoe2e on KITScenes (no Ray run or no internal_val ADE/FDE) |
 
 Stage 8 reuses `prepare_overlay_set`, `precompute_overlay_partition`, and
-`finalize_overlay_set`. Overlays are keyed by the checkpoint SHA-256 and the
+`finalize_overlay_set`. Reactive inference costs about 14 s per sample on an
+L4, so the non-empty partitions are split into `runtime.overlay_workers`
+chunks that run in parallel on the scale-to-zero `gpu-overlay` pool (at most
+20 GPUs); 42,667 samples on 16 GPUs take about 11 hours. A smoke model is
+put on the Console only on purpose: an `epochs=0` run with that model as
+`parent`, whose attribution (backbone, val_fraction, training execution,
+training dataset version, Ray run, internal_val ADE/FDE) is read from the
+parent's own LoggedModel. Overlays are keyed by the checkpoint SHA-256 and the
 Console publication digest from the dataset lineage
 (`console.manifest_sha256`), which is why a build without a Console
 publication has none. The overlay metadata names the registry version
