@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -307,3 +308,32 @@ def test_overlay_chunks_cover_every_partition_once(count, workers, sizes):
     assert [u for c in chunks for u in c] == uris
     with pytest.raises(ValueError, match="at least 1"):
         overlay_chunks(uris, 0)
+
+
+def test_overlay_source_reads_a_parent_from_its_logged_model():
+    from types import SimpleNamespace
+
+    from Platform.pipelines.autoe2e import RegisteredModel, TrainedCheckpoints, overlay_source
+
+    parent = RegisteredModel("parent", "m-p", "70", "s3://c/p.pt", "c" * 64, "l" * 64)
+    metric = lambda key, value, ts: SimpleNamespace(key=key, value=value, timestamp=ts)  # noqa: E731
+    logged = SimpleNamespace(source_run_id="r" * 32, metrics=[
+        metric("eval/internal_val/kitscenes-v3.7/validation_ade_6p4s_m", 9.0, 1),
+        metric("eval/internal_val/kitscenes-v3.7/validation_ade_6p4s_m", 3.0, 2),
+        metric("eval/internal_val/kitscenes-v3.7/validation_fde_6p4s_m", 7.0, 2),
+        metric("eval/kitscenes_benchmark/kitscenes-val-v3.6/ade_3s_m", 1.0, 3),
+    ])
+    client = SimpleNamespace(get_logged_model=lambda model_id: logged)
+    model, run_id, metrics_json = overlay_source(client, [parent], TrainedCheckpoints(trained=False))
+    assert (model, run_id) == (parent, "r" * 32)
+    assert json.loads(metrics_json) == {"validation_ade_6p4s_m": 3.0, "validation_fde_6p4s_m": 7.0}
+    logged.source_run_id = None
+    assert overlay_source(client, [parent], TrainedCheckpoints(trained=False)) is None
+
+
+def test_overlay_source_prefers_the_new_best_of_a_training_run():
+    from Platform.pipelines.autoe2e import RegisteredModel, TrainedCheckpoints, overlay_source
+
+    best = RegisteredModel("best", "m-b", "71", "s3://c/b.pt", "b" * 64, "l" * 64)
+    trained = TrainedCheckpoints(trained=True, run_id="t" * 32, best_metrics_json="{}")
+    assert overlay_source(None, [best], trained) == (best, "t" * 32, "{}")
