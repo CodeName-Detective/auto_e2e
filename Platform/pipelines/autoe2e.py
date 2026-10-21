@@ -128,6 +128,8 @@ class RuntimeOptions:
     tracking_url: str = ""
     # The Console serves overlays from this bucket; empty skips them.
     artifacts_bucket: str = ""
+    # Overlay GPUs; the overlay pool holds at most 20.
+    overlay_workers: int = 16
 
 
 @dataclass
@@ -825,6 +827,14 @@ def resolve_overlay_checkpoint(
     return ResolvedOverlayModel(checkpoint=FlyteFile(str(path)), metadata=FlyteFile(str(meta)))
 
 
+def overlay_chunks(uris: List[str], workers: int) -> List[List[str]]:
+    """Split partitions into at most ``workers`` contiguous, non-empty chunks."""
+    if workers < 1:
+        raise ValueError("overlay_workers must be at least 1")
+    size = -(-len(uris) // min(workers, len(uris)))
+    return [uris[i:i + size] for i in range(0, len(uris), size)]
+
+
 def console_manifest_sha256(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> str:
     """The Console publication digest, or "" when the build was not published there."""
     from Platform.pipelines.autoe2e_store import read_dataset_lineage
@@ -881,14 +891,17 @@ def publish_overlays(
         base_seeds=[0],
     )
     gate = prepare_overlay_set(resolved_metadata=resolved.metadata, sampler="model-default", **common, **contract)
-    result = precompute_overlay_partition(
-        checkpoint=resolved.checkpoint, model_metadata=resolved.metadata, prepare_gate=gate,
-        shard_dirs=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
-        # The benchmark evaluator's batch; in-process decoding keeps T8 camera
-        # history within the 16Gi host limit, which OOM halving cannot catch.
-        batch_size=4, num_workers=0, **common, **contract,
-    )
-    finalize_overlay_set(model_metadata=resolved.metadata, partition_results=[result], prepare_gate=gate, **common)
+    results = [
+        precompute_overlay_partition(
+            checkpoint=resolved.checkpoint, model_metadata=resolved.metadata, prepare_gate=gate,
+            shard_dirs=[FlyteDirectory.from_source(uri) for uri in chunk],
+            # The benchmark evaluator's batch; in-process decoding keeps T8 camera
+            # history within the 16Gi host limit, which OOM halving cannot catch.
+            batch_size=4, num_workers=0, **common, **contract,
+        )
+        for chunk in overlay_chunks(dataset.partition_uris, runtime.overlay_workers)
+    ]
+    finalize_overlay_set(model_metadata=resolved.metadata, partition_results=results, prepare_gate=gate, **common)
 
 
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=EXPERIMENT_ENV, retries=2)
