@@ -767,42 +767,49 @@ def evaluate(
 # --- Console overlays -------------------------------------------------------------
 
 
-def overlay_metadata(*, model: RegisteredModel, run_id: str, dataset_source: str, dataset_version: str,
-                     training: TrainingSpec, metrics_json: str, execution_id: str) -> dict:
+@dataclass
+class OverlaySource:
+    """The model to overlay and the training facts the Console shows with it."""
+
+    model: RegisteredModel
+    run_id: str
+    metrics_json: str
+    backbone: str
+    val_fraction: float
+    train_execution_id: str
+    train_dataset_version: str
+
+
+def overlay_metadata(source: OverlaySource, *, dataset_source: str) -> dict:
     """The model coordinates overlay_store writes next to every overlay pointer."""
     from Platform.pipelines.autoe2e_mlflow import REGISTERED_MODEL
 
-    metrics = numeric_leaves("", json.loads(metrics_json))
+    metrics = numeric_leaves("", json.loads(source.metrics_json))
     if "validation_ade_6p4s_m" not in metrics or "validation_fde_6p4s_m" not in metrics:
         # A 0.0 ADE would be written immutably next to every overlay pointer.
         raise ValueError("overlays need the Ray validation ADE/FDE of a trajectory model")
+    model = source.model
     return {
         "registered_model_name": REGISTERED_MODEL,
         "model_version": str(int(model.version)),
-        "run_id": run_id,
+        "run_id": source.run_id,
         "artifact_uri": f"models:/{model.model_id}",
         "checkpoint_uri": model.checkpoint_uri,
         "checkpoint_sha256": model.checkpoint_sha256,
-        "model_name": training.backbone,
+        "model_name": source.backbone,
         # Ray validation reports the full 6.4 s horizon.
         "eval_ade": metrics["validation_ade_6p4s_m"],
         "eval_fde": metrics["validation_fde_6p4s_m"],
         "dataset_source": dataset_source,
-        "dataset_version_source": dataset_version,
-        "train_execution_id": execution_id,
-        "val_fraction": str(training.val_fraction),
+        "dataset_version_source": source.train_dataset_version,
+        "train_execution_id": source.train_execution_id,
+        "val_fraction": str(source.val_fraction),
     }
 
 
 @task(container_image=TRAINING_IMAGE, requests=Resources(cpu="2", mem="8Gi"), environment=PIPELINE_ENV, retries=2)
-def resolve_overlay_checkpoint(
-    model: RegisteredModel,
-    run_id: str,
-    metrics_json: str,
-    training: TrainingSpec,
-    dataset: DatasetHandle,
-) -> ResolvedOverlayModel:
-    """Download the stored best checkpoint and describe it for overlay_store."""
+def resolve_overlay_checkpoint(source: OverlaySource) -> ResolvedOverlayModel:
+    """Download the stored checkpoint and describe it for overlay_store."""
     import tempfile
     from pathlib import Path
 
@@ -810,57 +817,92 @@ def resolve_overlay_checkpoint(
 
     from Platform.pipelines.inference import sha256_file
 
+    model = source.model
     root = Path(tempfile.mkdtemp(prefix="overlay-model-"))
     path = root / "best.pt"
     bucket, _, key = model.checkpoint_uri.removeprefix("s3://").partition("/")
     _s3().download_file(bucket, key, str(path))
     if sha256_file(path) != model.checkpoint_sha256:
         raise RuntimeError(f"{model.checkpoint_uri} differs from its registered sha256")
-    metadata = overlay_metadata(
-        model=model, run_id=run_id,
-        # Precompute rejects a checkpoint whose training policy names another dataset.
-        dataset_source=KITSCENES_DATASET_NAME,
-        dataset_version=dataset.version, training=training,
-        metrics_json=metrics_json, execution_id=_execution_id(),
-    )
+    # Precompute rejects a checkpoint whose training policy names another dataset.
+    metadata = overlay_metadata(source, dataset_source=KITSCENES_DATASET_NAME)
     meta = root / "model-metadata.json"
     meta.write_text(json.dumps(metadata, indent=2, sort_keys=True))
     return ResolvedOverlayModel(checkpoint=FlyteFile(str(path)), metadata=FlyteFile(str(meta)))
 
 
-def overlay_source(client, models: List[RegisteredModel], trained: TrainedCheckpoints):
-    """The model to overlay, its Ray run, and its validation metrics, or None.
+_OVERLAY_METRICS = ("validation_ade_6p4s_m", "validation_fde_6p4s_m")
 
-    A training run overlays its ``best``. An ``epochs=0`` run overlays its
-    parent when the parent was trained by wf_autoe2e, reading the run and the
-    internal_val metrics from the parent's LoggedModel, so an existing model
-    can be put on a new Console dataset without retraining.
+
+def overlay_source(client, s3, models: List[RegisteredModel], trained: TrainedCheckpoints,
+                   training: TrainingSpec, dataset: DatasetHandle,
+                   runtime: RuntimeOptions) -> Optional[OverlaySource]:
+    """What to overlay, or None.
+
+    A training run overlays its ``best``, except a one-GPU smoke, whose few
+    steps must not become the Console's newest model by accident. An
+    ``epochs=0`` run overlays its parent when wf_autoe2e trained that parent
+    on KITScenes; the run, metrics, and training facts then come from the
+    parent's LoggedModel, so an existing model can be put on a new Console
+    dataset without retraining.
     """
     if trained.trained:
         best = [m for m in models if m.role == "best"]
-        return (best[0], trained.run_id, trained.best_metrics_json) if best else None
+        if not best or training.gpu_profile is GpuProfile.RAY_1:
+            return None
+        return OverlaySource(best[0], trained.run_id, trained.best_metrics_json, training.backbone,
+                             training.val_fraction, _execution_id(), dataset.version)
     parents = [m for m in models if m.role == "parent"]
     if not parents:
         return None
     logged = client.get_logged_model(parents[0].model_id)
-    if not logged.source_run_id:
-        return None  # an imported checkpoint has no Ray validation
+    params = dict(logged.params or {})
+    if not logged.source_run_id or params.get("dataset.dataset") != "kitscenes":
+        return None  # imported, or not a KITScenes trajectory model
     latest = {}
     for metric in logged.metrics or []:
         name = metric.key.rpartition("/")[2]
-        if metric.key.startswith("eval/internal_val/") and name in {"validation_ade_6p4s_m", "validation_fde_6p4s_m"}:
+        if metric.key.startswith("eval/internal_val/") and name in _OVERLAY_METRICS:
             if name not in latest or metric.timestamp > latest[name].timestamp:
                 latest[name] = metric
-    metrics = {name: metric.value for name, metric in latest.items()}
-    return parents[0], logged.source_run_id, json.dumps(metrics, sort_keys=True)
+    if set(latest) != set(_OVERLAY_METRICS):
+        return None
+    from Platform.pipelines.autoe2e_dataset import dataset_index_key
+
+    index = json.loads(s3.get_object(
+        Bucket=runtime.datasets_bucket, Key=dataset_index_key("kitscenes", params["dataset_id"]),
+    )["Body"].read())
+    return OverlaySource(
+        parents[0], logged.source_run_id,
+        json.dumps({name: metric.value for name, metric in latest.items()}, sort_keys=True),
+        # flatten() keeps strings as-is and JSON-encodes other leaves.
+        params["training.backbone"], float(params["training.val_fraction"]), params["provenance.flyte_execution_id"], index["version"],
+    )
 
 
 def overlay_chunks(uris: List[str], workers: int) -> List[List[str]]:
     """Split partitions into at most ``workers`` contiguous, non-empty chunks."""
     if workers < 1:
         raise ValueError("overlay_workers must be at least 1")
+    if not uris:
+        raise ValueError("no partitions with samples to overlay")
     size = -(-len(uris) // min(workers, len(uris)))
     return [uris[i:i + size] for i in range(0, len(uris), size)]
+
+
+def nonempty_partition_uris(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> List[str]:
+    """Partitions with samples; precompute fails a chunk that has none."""
+    from Platform.pipelines.autoe2e_dataset import views_manifest_key
+    from Platform.pipelines.dataset_publication import sha256_bytes
+
+    payload = s3.get_object(
+        Bucket=runtime.datasets_bucket, Key=views_manifest_key(dataset.published_name, dataset.version),
+    )["Body"].read()
+    if sha256_bytes(payload) != dataset.views_sha256:
+        raise ValueError("partition views manifest differs from the dataset index")
+    counts = {f"s3://{runtime.datasets_bucket}/{view['prefix']}": view["sample_count"]
+              for view in json.loads(payload)["partitions"]}
+    return [uri for uri in dataset.partition_uris if counts[uri.rstrip("/")] > 0]
 
 
 def console_manifest_sha256(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> str:
@@ -899,18 +941,18 @@ def publish_overlays(
         preprocessing_contract_digest,
     )
 
-    source = overlay_source(_client(), models, trained) if runtime.artifacts_bucket else None
-    if source is None or dataset.published_name != "kitscenes":
-        print("overlays skipped: no wf_autoe2e-trained model on the kitscenes publication")
+    s3 = _s3()
+    source = None
+    if runtime.artifacts_bucket and dataset.published_name == "kitscenes":
+        source = overlay_source(_client(), s3, models, trained, training, dataset, runtime)
+    if source is None:
+        print("overlays skipped: no wf_autoe2e-trained KITScenes model (or a RAY_1 smoke) on kitscenes")
         return
-    model, run_id, metrics_json = source
-    manifest_sha256 = console_manifest_sha256(_s3(), dataset, runtime)
+    manifest_sha256 = console_manifest_sha256(s3, dataset, runtime)
     if not manifest_sha256:
         print(f"overlays skipped: {dataset.published_name}/{dataset.version} is not on the Console")
         return
-    resolved = resolve_overlay_checkpoint(
-        model=model, run_id=run_id, metrics_json=metrics_json, training=training, dataset=dataset,
-    )
+    resolved = resolve_overlay_checkpoint(source=source)
     common = dict(
         dataset=dataset.published_name, dataset_version=dataset.version,
         dataset_manifest_digest=manifest_sha256, artifacts_bucket=runtime.artifacts_bucket,
@@ -931,7 +973,7 @@ def publish_overlays(
             # history within the 16Gi host limit, which OOM halving cannot catch.
             batch_size=4, num_workers=0, **common, **contract,
         )
-        for chunk in overlay_chunks(dataset.partition_uris, runtime.overlay_workers)
+        for chunk in overlay_chunks(nonempty_partition_uris(s3, dataset, runtime), runtime.overlay_workers)
     ]
     finalize_overlay_set(model_metadata=resolved.metadata, partition_results=results, prepare_gate=gate, **common)
 
