@@ -271,8 +271,9 @@ Known gaps:
 Stage 8 reuses `prepare_overlay_set`, `precompute_overlay_partition`, and
 `finalize_overlay_set`. Reactive inference costs about 14 s per sample on an
 L4, so the non-empty partitions are split into `runtime.overlay_workers`
-chunks that run in parallel on the scale-to-zero `gpu-overlay` pool (at most
-20 GPUs); at that rate 42,667 samples on 16 GPUs need about 11 hours. A smoke model is
+chunks that run in parallel on the scale-to-zero `gpu-overlay` pool. The
+development namespace quota admits 10 GPU requests at once, so the default is
+10 chunks; at that rate 42,667 samples need about 17 hours. A smoke model is
 put on the Console only on purpose: an `epochs=0` run with that model as
 `parent`, whose attribution (backbone, val_fraction, training execution,
 training dataset version, Ray run, internal_val ADE/FDE) is read from the
