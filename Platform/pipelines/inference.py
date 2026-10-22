@@ -12,7 +12,9 @@ import torch
 
 
 NOISE_POLICY_VERSION = "v1"
-INFERENCE_CONTRACT_VERSION = "v4"
+# v5: CUDA inference runs under bf16 autocast, the KITScenes benchmark's
+# precision policy, so Console trajectories match the reported metrics.
+INFERENCE_CONTRACT_VERSION = "v5"
 
 
 def sha256_file(path: str | Path, chunk_size: int = 8 << 20) -> str:
@@ -71,6 +73,15 @@ def load_policy(
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, config, artifact_id
+
+
+def inference_autocast(device: torch.device):
+    """bf16 autocast on CUDA, nothing elsewhere."""
+    import contextlib
+
+    if torch.device(device).type != "cuda":
+        return contextlib.nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 
 
 def stable_seed64(
@@ -297,7 +308,7 @@ def predict_control(
     if batch.get("future_frames") is not None:
         kwargs["future_frames"] = batch["future_frames"]
 
-    with torch.no_grad():
+    with torch.no_grad(), inference_autocast(visual.device):
         prediction = model(
             visual,
             batch["map_context"],
@@ -318,6 +329,7 @@ def predict_control(
     return (
         prediction.reshape(batch_size, num_timesteps, num_signals)
         .detach()
+        .float()
         .cpu()
         .numpy()
     )
