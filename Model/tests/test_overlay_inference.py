@@ -559,3 +559,14 @@ def test_reactive_policy_kwargs_use_the_stage_constructor_not_the_saved_config()
         "backbone": "res_net_50", "embed_dim": 256, "is_pretrained": False,
         **reactive_model_kwargs(ReactiveTrainingStage.KITSCENES_FINETUNE, num_views=6),
     }
+
+
+def test_inference_autocast_is_bf16_on_cuda_only():
+    from Platform.pipelines.inference import INFERENCE_CONTRACT_VERSION, inference_autocast
+
+    assert INFERENCE_CONTRACT_VERSION == "v5"
+    with inference_autocast(torch.device("cpu")):
+        assert not torch.is_autocast_enabled()
+    context = inference_autocast(torch.device("cuda"))
+    assert isinstance(context, torch.autocast)
+    assert context.fast_dtype == torch.bfloat16
