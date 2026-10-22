@@ -128,8 +128,9 @@ class RuntimeOptions:
     tracking_url: str = ""
     # The Console serves overlays from this bucket; empty skips them.
     artifacts_bucket: str = ""
-    # Overlay GPUs; the overlay pool holds at most 20.
-    overlay_workers: int = 16
+    # Overlay GPUs. The development namespace quota admits 10 GPU requests at
+    # once; more chunks only wait for a second round.
+    overlay_workers: int = 10
 
 
 @dataclass
