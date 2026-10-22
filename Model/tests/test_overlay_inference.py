@@ -232,7 +232,7 @@ def test_predict_control_uses_packed_projection_and_native_front():
         geometry_type="pinhole",
     )
 
-    assert INFERENCE_CONTRACT_VERSION == "v4"
+    assert INFERENCE_CONTRACT_VERSION == "v5"
     assert model.kwargs is not None
     assert torch.equal(model.kwargs["projection"].matrix, matrix)
     assert torch.equal(model.kwargs["front_projection"].matrix, front_matrix)
