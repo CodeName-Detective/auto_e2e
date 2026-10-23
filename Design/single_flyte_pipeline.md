@@ -269,9 +269,10 @@ Known gaps:
 | 8 | Precompute Console overlays on the training dataset for the new `best`, or for the parent of an `epochs=0` run | the dataset is not `kitscenes` or has no Console publication (`unit_limit > 0`), `runtime.artifacts_bucket` is empty, the run is a `ray_1` smoke, or the parent was not trained by wf_autoe2e on KITScenes (no Ray run or no internal_val ADE/FDE) |
 
 Stage 8 reuses `prepare_overlay_set`, `precompute_overlay_partition`, and
-`finalize_overlay_set`. Reactive inference costs about 14 s per sample on an
-L4, so the non-empty partitions are split into `runtime.overlay_workers`
-chunks that run in parallel on the scale-to-zero `gpu-overlay` pool. The
+`finalize_overlay_set`. Reactive inference costs about 15 to 20 s per sample on an
+L4 in bf16, so the non-empty partitions are split into
+`runtime.overlay_workers` chunks of similar sample count that run in parallel
+on the scale-to-zero `gpu-overlay` pool. The
 development namespace quota admits 10 GPU requests at once, so the default is
 10 chunks; at that rate 42,667 samples need about 17 hours. A smoke model is
 put on the Console only on purpose: an `epochs=0` run with that model as
