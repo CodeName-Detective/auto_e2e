@@ -16,7 +16,7 @@ import json
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 from flytekit import Resources, dynamic, task, workflow
 from flytekit.types.directory import FlyteDirectory
@@ -881,18 +881,32 @@ def overlay_source(client, s3, models: List[RegisteredModel], trained: TrainedCh
     )
 
 
-def overlay_chunks(uris: List[str], workers: int) -> List[List[str]]:
-    """Split partitions into at most ``workers`` contiguous, non-empty chunks."""
+def overlay_chunks(counts: Dict[str, int], workers: int) -> List[List[str]]:
+    """Split partitions into at most ``workers`` chunks of similar sample count.
+
+    Largest partitions go first to the lightest chunk, so the stage does not
+    wait on one chunk that happened to get the big scenes; each chunk keeps
+    the dataset's partition order.
+    """
     if workers < 1:
         raise ValueError("overlay_workers must be at least 1")
-    if not uris:
+    if not counts:
         raise ValueError("no partitions with samples to overlay")
-    size = -(-len(uris) // min(workers, len(uris)))
-    return [uris[i:i + size] for i in range(0, len(uris), size)]
+    order = {uri: index for index, uri in enumerate(counts)}
+    chunks: List[List[str]] = [[] for _ in range(min(workers, len(counts)))]
+    loads = [0] * len(chunks)
+    for uri in sorted(counts, key=lambda u: (-counts[u], order[u])):
+        lightest = min(range(len(chunks)), key=lambda i: (loads[i], i))
+        chunks[lightest].append(uri)
+        loads[lightest] += counts[uri]
+    return [sorted(chunk, key=order.__getitem__) for chunk in chunks]
 
 
-def nonempty_partition_uris(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> List[str]:
-    """Partitions with samples; precompute fails a chunk that has none."""
+def partition_sample_counts(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> Dict[str, int]:
+    """Sample count of each partition with samples, in dataset order.
+
+    Precompute fails a chunk that has no samples, so empty partitions are left out.
+    """
     from Platform.pipelines.autoe2e_dataset import views_manifest_key
     from Platform.pipelines.dataset_publication import sha256_bytes
 
@@ -903,7 +917,7 @@ def nonempty_partition_uris(s3, dataset: DatasetHandle, runtime: RuntimeOptions)
         raise ValueError("partition views manifest differs from the dataset index")
     counts = {f"s3://{runtime.datasets_bucket}/{view['prefix']}": view["sample_count"]
               for view in json.loads(payload)["partitions"]}
-    return [uri for uri in dataset.partition_uris if counts[uri.rstrip("/")] > 0]
+    return {uri: counts[uri.rstrip("/")] for uri in dataset.partition_uris if counts[uri.rstrip("/")] > 0}
 
 
 def console_manifest_sha256(s3, dataset: DatasetHandle, runtime: RuntimeOptions) -> str:
@@ -974,7 +988,7 @@ def publish_overlays(
             # history within the 16Gi host limit, which OOM halving cannot catch.
             batch_size=4, num_workers=0, **common, **contract,
         )
-        for chunk in overlay_chunks(nonempty_partition_uris(s3, dataset, runtime), runtime.overlay_workers)
+        for chunk in overlay_chunks(partition_sample_counts(s3, dataset, runtime), runtime.overlay_workers)
     ]
     finalize_overlay_set(model_metadata=resolved.metadata, partition_results=results, prepare_gate=gate, **common)
 
