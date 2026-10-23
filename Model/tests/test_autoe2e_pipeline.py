@@ -299,16 +299,21 @@ def test_overlays_need_a_console_publication(monkeypatch):
         assert console_manifest_sha256(S3(), handle, runtime) == expected
 
 
-@pytest.mark.parametrize(("count", "workers", "sizes"), [(533, 16, [34] * 15 + [23]), (2, 16, [1, 1]), (5, 1, [5])])
-def test_overlay_chunks_cover_every_partition_once(count, workers, sizes):
+def test_overlay_chunks_balance_samples_and_cover_every_partition_once():
     from Platform.pipelines.autoe2e import overlay_chunks
 
-    uris = [f"s3://d/p{i:03d}/" for i in range(count)]
-    chunks = overlay_chunks(uris, workers)
-    assert [len(c) for c in chunks] == sizes
-    assert [u for c in chunks for u in c] == uris
+    counts = {f"s3://d/p{i:03d}": c for i, c in enumerate([500, 10, 10, 10, 480, 20, 30, 5])}
+    chunks = overlay_chunks(counts, 2)
+    assert sorted(u for c in chunks for u in c) == sorted(counts)
+    loads = sorted(sum(counts[u] for u in c) for c in chunks)
+    assert loads == [530, 535]
+    for chunk in chunks:
+        assert chunk == sorted(chunk)  # dataset order inside a chunk
+    assert [len(c) for c in overlay_chunks(dict(list(counts.items())[:2]), 16)] == [1, 1]
     with pytest.raises(ValueError, match="at least 1"):
-        overlay_chunks(uris, 0)
+        overlay_chunks(counts, 0)
+    with pytest.raises(ValueError, match="no partitions"):
+        overlay_chunks({}, 4)
 
 
 def _parent_logged(**params):
@@ -368,7 +373,7 @@ def test_overlay_source_takes_a_training_best_but_not_a_one_gpu_smoke():
 
 
 def test_overlays_skip_partitions_without_samples():
-    from Platform.pipelines.autoe2e import RuntimeOptions, nonempty_partition_uris
+    from Platform.pipelines.autoe2e import RuntimeOptions, partition_sample_counts
     from Platform.pipelines.autoe2e_store import DatasetHandle
 
     s3 = S3()
@@ -378,4 +383,4 @@ def test_overlays_skip_partitions_without_samples():
     uris = [f"s3://{BUCKET}/kitscenes/v3.7/partitions/p0", f"s3://{BUCKET}/kitscenes/v3.7/partitions/p1"]
     handle = DatasetHandle("e" * 64, "kitscenes", "v3.7", True, "x", views_sha256=sha256_bytes(views),
                            partition_uris=uris)
-    assert nonempty_partition_uris(s3, handle, RuntimeOptions(datasets_bucket=BUCKET)) == uris[:1]
+    assert partition_sample_counts(s3, handle, RuntimeOptions(datasets_bucket=BUCKET)) == {uris[0]: 3}
