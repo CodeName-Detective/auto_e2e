@@ -186,7 +186,6 @@ kubectl --namespace kueue-system get configmap kueue-manager-config \
   > /tmp/auto-e2e-kueue-manager-config.yaml
 for framework in \
   batch/job \
-  kubeflow.org/pytorchjob \
   ray.io/rayjob \
   pod
 do
