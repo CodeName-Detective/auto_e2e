@@ -200,3 +200,12 @@ def test_the_launcher_imports_both_workflows_without_torch():
     env = {"PYTHONPATH": f"{root / 'Model'}:{root}", "PATH": "/usr/bin:/bin"}
     result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr[-2000:]
+
+
+def test_benchmark_evaluation_uses_the_reviewed_batch():
+    import inspect
+
+    import Platform.pipelines.autoe2e as wf
+
+    source = inspect.getsource(wf.evaluate_kitscenes_benchmark.task_function)
+    assert "batch_size=4" in source
