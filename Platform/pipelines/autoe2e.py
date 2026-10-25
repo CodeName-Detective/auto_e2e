@@ -724,6 +724,10 @@ def evaluate_kitscenes_benchmark(
             checkpoint=FlyteFile(model.checkpoint_uri),
             shards=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
             source_split=split,
+            # The evaluator's reviewed maximum; batch 1 took about 17 s per
+            # sample, 50+ hours for the 11,035-sample val split.
+            batch_size=4,
+            num_loader_workers=2,
         )
         report_bytes = open(output.report.download(), "rb").read()
         if sha256_bytes(report_bytes) != output.report_sha256 or output.checkpoint_sha256 != model.checkpoint_sha256:
