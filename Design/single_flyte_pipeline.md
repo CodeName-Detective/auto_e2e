@@ -247,13 +247,12 @@ The code that fetches metadata from the Hub today
 `Model/data_parsing/kit_scenes/source.py`, and the KITScenes test direct
 pack) reads the same files from the snapshot instead.
 
-Known gaps:
-
-- nuPlan Reactive packs carry no `partition_id`, which Ray's dataset plan
-  requires, so `pack_partition` refuses nuPlan until the packer emits one.
-- The L2D Reactive contract needs OSM navigation (14 map channels), but no
-  Flyte task passes `osm_graph_snapshot_path` to the packer. The L2D adapter
-  rejects a spec without `osm_graph_snapshot` until that is wired.
+L2D is out of scope for this pipeline. L2D has no HD map: it ships an RGB
+map image (640x360) and ten GPS route waypoints, while the Reactive contract
+needs the 14-channel semantic map that only an OSM graph snapshot can supply
+for L2D. The L2D adapter therefore rejects every spec with that reason, and
+L2D support is left to a separate change that either wires an OSM snapshot
+into the packer or adds an image-map Reactive path.
 
 ## 5. `wf_autoe2e` Stages
 
