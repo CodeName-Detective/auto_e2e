@@ -49,14 +49,6 @@ module "rds" {
   environment                   = var.environment
 }
 
-module "training_operator" {
-  source = "./modules/training-operator"
-
-  cluster_name = var.cluster_name
-
-  depends_on = [module.eks]
-}
-
 module "kuberay" {
   source = "./modules/kuberay"
 
@@ -70,7 +62,7 @@ module "kueue" {
 
   cluster_name = var.cluster_name
 
-  depends_on = [module.training_operator, module.kuberay]
+  depends_on = [module.kuberay]
 }
 
 module "mlflow" {
@@ -100,7 +92,7 @@ module "flyte" {
   oidc_provider_arn   = module.eks.oidc_provider_arn
   oidc_provider_url   = module.eks.oidc_provider_url
 
-  depends_on = [module.rds, module.storage, module.training_operator, module.kueue]
+  depends_on = [module.rds, module.storage, module.kueue]
 }
 
 # IAM user for Flyte S3 access (stow library doesn't support IRSA/Pod Identity)
