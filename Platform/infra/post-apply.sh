@@ -130,7 +130,7 @@ raise SystemExit(
   fi
 done
 
-wait_for_gpu_quota auto-e2e-development 18
+wait_for_gpu_quota auto-e2e-development 34
 wait_for_gpu_quota auto-e2e-staging 0
 wait_for_gpu_quota auto-e2e-production 0
 
