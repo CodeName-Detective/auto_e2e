@@ -710,7 +710,11 @@ def evaluate_kitscenes_benchmark(
 ) -> None:
     """Re-run every model on a KITScenes val or test publication."""
     from Platform.pipelines import autoe2e_mlflow as am
-    from Platform.pipelines.distributed_training import evaluate_reactive_kitscenes_checkpoint
+    from Platform.pipelines.distributed_training import (
+        KITSCENES_OFFICIAL_VAL_SCENE_COUNT,
+        KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE,
+        evaluate_reactive_kitscenes_checkpoint,
+    )
     from Platform.pipelines.dataset_publication import sha256_bytes
 
     split = {"kitscenes-val": "val", "kitscenes-test": "test"}.get(dataset.published_name)
@@ -724,10 +728,17 @@ def evaluate_kitscenes_benchmark(
             checkpoint=FlyteFile(model.checkpoint_uri),
             shards=[FlyteDirectory.from_source(uri) for uri in dataset.partition_uris],
             source_split=split,
-            # The evaluator's reviewed maximum; batch 1 took about 17 s per
-            # sample, 50+ hours for the 11,035-sample val split.
-            batch_size=4,
+            # The reviewed official-split path: the stateful camera FPN cache
+            # reuses each frame's features across the T8 history instead of
+            # recomputing them, which made stateless inference about 15 s per
+            # sample (two days for the 11,035-sample val split).
+            use_stateful_camera_fpn_cache=True,
+            batch_size=KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE,
             num_loader_workers=2,
+            expected_val_partition_count=(
+                len(dataset.partition_uris)
+                if split == "val" and len(dataset.partition_uris) == KITSCENES_OFFICIAL_VAL_SCENE_COUNT else 0
+            ),
         )
         report_bytes = open(output.report.download(), "rb").read()
         if sha256_bytes(report_bytes) != output.report_sha256 or output.checkpoint_sha256 != model.checkpoint_sha256:
