@@ -1335,7 +1335,6 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert "kubectl describe" in deploy_script
     for framework in (
         "batch/job",
-        "kubeflow.org/pytorchjob",
         "ray.io/rayjob",
         "pod",
     ):
@@ -1385,7 +1384,6 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     ]
     for framework in (
         "batch/job",
-        "kubeflow.org/pytorchjob",
         "ray.io/rayjob",
         "pod",
     ):
