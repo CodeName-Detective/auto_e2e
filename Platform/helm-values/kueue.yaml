@@ -65,6 +65,5 @@ managerConfig:
     integrations:
       frameworks:
         - batch/job
-        - kubeflow.org/pytorchjob
         - ray.io/rayjob
         - pod
