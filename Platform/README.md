@@ -227,10 +227,9 @@ S3 Shards → Ray Train (Kueue managed) → p5en.48xlarge → MLflow
 ```
 
 - **Kueue**: GPU quota management, priority-based admission
-- **Training Operator**: PyTorchJob CRD → Pod with `nvidia.com/gpu` request
+- **KubeRay**: RayJob per training task; Kueue admits it on the profile's queue
 - **Model**: AutoE2E (SwinV2 Tiny + BEV fusion)
 - **Output**: Checkpoint (S3) + metrics (MLflow)
-- `runPolicy.suspend: true` enables Kueue admission control
 
 ### Open-Loop Evaluation
 
@@ -279,7 +278,7 @@ All resources managed by Terraform under `Platform/infra/`. No hardcoded account
 | `mlflow` | Helm release (S3 artifacts, RDS backend) |
 | `flyte` | Helm release (flyte-core), IAM User for S3 access |
 | `kueue` | Helm release, ResourceFlavor/ClusterQueue/LocalQueue |
-| `training-operator` | Kubeflow Training Operator v1.9.3 |
+| `kuberay` | KubeRay operator for Ray Train jobs |
 | `ecr` | ECR repositories for the training, eval, offline-rl, and data-prep images |
 | `codebuild` | Docker image build + Flyte workflow registration (VPC) |
 | `cloudfront` | CloudFront distributions with VPC origins for the internal UIs |
@@ -346,7 +345,7 @@ Platform/
 │   │   ├── mlflow/                 Helm release
 │   │   ├── flyte/                  Helm release + IAM User
 │   │   ├── kueue/                  Helm release
-│   │   ├── training-operator/      kubectl apply (kustomize)
+│   │   ├── kuberay/                Helm release
 │   │   ├── codebuild/              Docker build
 │   │   ├── ecr/                    Image repositories
 │   │   ├── cloudfront/             CloudFront + VPC origins
