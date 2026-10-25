@@ -1326,7 +1326,7 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert "nodepool/gpu-validation" in deploy_script
     assert "nodeclass/auto-e2e-p5en-capacity-block" in deploy_script
     assert "kueue-manager-config" in deploy_script
-    assert "wait_for_gpu_quota auto-e2e-development 18" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-development 34" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-staging 0" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-production 0" in deploy_script
     assert '"limits.nvidia.com/gpu" not in hard' in deploy_script
@@ -2382,7 +2382,7 @@ def test_flyte_resource_quota_tracks_all_gpu_capacity():
         for domain, settings in item.items()
     }
 
-    assert domains["development"]["projectQuotaGpu"] == "18"
+    assert domains["development"]["projectQuotaGpu"] == "34"
     assert domains["staging"]["projectQuotaGpu"] == "0"
     assert domains["production"]["projectQuotaGpu"] == "0"
     assert "limits.nvidia.com/gpu: {{ projectQuotaGpu }}" not in values_text
