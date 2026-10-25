@@ -22,10 +22,10 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: gpu-overlay-flavor
+  name: p5en-capacity-block-flavor
 spec:
   nodeLabels:
-    workload-type: gpu-overlay
+    workload-type: p5en-capacity-block
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -34,10 +34,10 @@ spec:
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ResourceFlavor
 metadata:
-  name: p5en-capacity-block-flavor
+  name: gpu-overlay-flavor
 spec:
   nodeLabels:
-    workload-type: p5en-capacity-block
+    workload-type: gpu-overlay
   tolerations:
     - key: nvidia.com/gpu
       operator: Exists
@@ -131,23 +131,23 @@ spec:
     withinClusterQueue: Never
     reclaimWithinCohort: Never
 ---
-# wf_autoe2e overlay precompute fans out here; matches the live queue.
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: ClusterQueue
 metadata:
   name: gpu-overlay-queue
 spec:
+  queueingStrategy: BestEffortFIFO
   namespaceSelector:
     matchExpressions:
       - key: kubernetes.io/metadata.name
         operator: In
-        values: ["auto-e2e-development"]
-  queueingStrategy: BestEffortFIFO
-  preemption:
-    reclaimWithinCohort: Never
-    withinClusterQueue: Never
+        values:
+          - auto-e2e-development
   resourceGroups:
-    - coveredResources: ["cpu", "memory", "ephemeral-storage"]
+    - coveredResources:
+        - cpu
+        - memory
+        - ephemeral-storage
       flavors:
         - name: default-flavor
           resources:
@@ -157,20 +157,16 @@ spec:
               nominalQuota: 576Gi
             - name: ephemeral-storage
               nominalQuota: 4Ti
-    - coveredResources: ["nvidia.com/gpu"]
+    - coveredResources:
+        - nvidia.com/gpu
       flavors:
         - name: gpu-overlay-flavor
           resources:
             - name: nvidia.com/gpu
               nominalQuota: "36"
----
-apiVersion: kueue.x-k8s.io/v1beta2
-kind: LocalQueue
-metadata:
-  name: gpu-overlay
-  namespace: auto-e2e-development
-spec:
-  clusterQueue: gpu-overlay-queue
+  preemption:
+    withinClusterQueue: Never
+    reclaimWithinCohort: Never
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
@@ -231,3 +227,11 @@ metadata:
 spec:
   clusterQueue: p5en-capacity-block-queue
   stopPolicy: HoldAndDrain
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: LocalQueue
+metadata:
+  name: gpu-overlay
+  namespace: auto-e2e-development
+spec:
+  clusterQueue: gpu-overlay-queue

@@ -1,6 +1,5 @@
 # NodePools behind the Kueue gpu-overlay-queue (flavor gpu-overlay-flavor,
-# nodeLabels workload-type=gpu-overlay), both defined in
-# kueue-config/kueue-objects.yaml.
+# nodeLabels workload-type=gpu-overlay, defined in kueue-config/kueue-objects.yaml).
 apiVersion: karpenter.sh/v1
 kind: NodePool
 metadata:
