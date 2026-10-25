@@ -394,8 +394,9 @@ cluster_resource_manager:
             - projectQuotaMemory:
                 value: "8Ti"
             - projectQuotaGpu:
-                # Two p5 Capacity Block nodes plus two retained g6 validation GPUs.
-                value: "18"
+                # Two p5 Capacity Block nodes (16), two g6 validation GPUs, and
+                # 16 overlay-pool GPUs for wf_autoe2e's overlay fan-out.
+                value: "34"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 
