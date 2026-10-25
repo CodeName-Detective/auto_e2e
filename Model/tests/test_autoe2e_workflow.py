@@ -202,10 +202,11 @@ def test_the_launcher_imports_both_workflows_without_torch():
     assert result.returncode == 0, result.stderr[-2000:]
 
 
-def test_benchmark_evaluation_uses_the_reviewed_batch():
+def test_benchmark_evaluation_uses_the_stateful_camera_fpn_path():
     import inspect
 
     import Platform.pipelines.autoe2e as wf
 
     source = inspect.getsource(wf.evaluate_kitscenes_benchmark.task_function)
-    assert "batch_size=4" in source
+    assert "use_stateful_camera_fpn_cache=True" in source
+    assert "batch_size=KITSCENES_STATEFUL_CAMERA_FPN_BATCH_SIZE" in source
