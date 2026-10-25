@@ -273,8 +273,8 @@ Stage 8 reuses `prepare_overlay_set`, `precompute_overlay_partition`, and
 L4 in bf16, so the non-empty partitions are split into
 `runtime.overlay_workers` chunks of similar sample count that run in parallel
 on the scale-to-zero `gpu-overlay` pool. The
-development namespace quota admits 10 GPU requests at once, so the default is
-10 chunks; at that rate 42,667 samples need about 17 hours. A smoke model is
+development namespace quota reserves 16 of its 34 GPU requests for this
+fan-out, so the default is 16 chunks; the v3.7 set took about 30 hours on 10. A smoke model is
 put on the Console only on purpose: an `epochs=0` run with that model as
 `parent`, whose attribution (backbone, val_fraction, training execution,
 training dataset version, Ray run, internal_val ADE/FDE) is read from the
