@@ -120,17 +120,10 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
         },
         {
           Effect = "Allow"
-          Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+          # Overlay and Console records are write-once: conditional PutItem only.
+          Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
           Resource = [
             "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
-          ]
-        },
-        {
-          Effect = "Allow"
-          Action = ["bedrock:InvokeModel"]
-          Resource = [
-            "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-opus-5",
-            "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-5",
           ]
         },
       ],
