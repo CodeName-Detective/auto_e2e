@@ -4,6 +4,7 @@ Model/navigation/native/libnavigation_rasterizer.so
 Model/navigation/native/libnavigation_rasterizer.dylib
 ._*
 benchmark_results.json
+.benchmark/
 **/data/
 
 # Local-only EC2 sync tooling (never committed)
