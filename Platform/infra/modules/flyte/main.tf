@@ -87,12 +87,20 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
         },
         # Packed snapshot publication uses conditional object writes and
         # server-side copies. It never deletes or mutates an existing version.
+        # wf_autoe2e pins snapshot manifests by VersionId, which needs
+        # GetObjectVersion even for objects stored without versioning ("null").
         {
           Effect = "Allow"
-          Action = ["s3:GetObject", "s3:PutObject"]
+          Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
           Resource = [
             "arn:aws:s3:::${var.datasets_bucket}/*",
           ]
+        },
+        # Ray training reads the end time of the active p5en Capacity Block.
+        {
+          Effect   = "Allow"
+          Action   = ["ec2:DescribeCapacityReservations"]
+          Resource = "*"
         },
         {
           Effect = "Allow"
@@ -112,6 +120,7 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
         },
         {
           Effect = "Allow"
+          # Overlay and Console records are write-once: conditional PutItem only.
           Action = ["dynamodb:GetItem", "dynamodb:PutItem"]
           Resource = [
             "arn:aws:dynamodb:${var.region}:${data.aws_caller_identity.current.account_id}:table/${var.console_dynamo_table_name}",
@@ -121,7 +130,7 @@ resource "aws_iam_role_policy" "flyte_user_s3" {
       var.checkpoints_bucket != "" ? [
         {
           Effect = "Allow"
-          Action = ["s3:GetObject", "s3:PutObject"]
+          Action = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
           Resource = [
             "arn:aws:s3:::${var.checkpoints_bucket}/*",
           ]
@@ -238,13 +247,15 @@ resource "helm_release" "flyte" {
 # Post-apply: patch Flyte control-plane storage configmaps to use accesskey auth.
 # The flyte-core chart only renders `iam` auth for type=s3; the stow/minio-go S3
 # client (AWS SDK v1) does not support IRSA/Pod Identity, so static keys are required.
-# Re-runs whenever the keys, bucket, or region change (idempotent kubectl replace).
+# Re-runs whenever the keys, bucket, or region change, and after every helm
+# upgrade: the chart re-renders `iam` auth, which the control plane cannot use.
 resource "null_resource" "flyte_storage_accesskey_patch" {
   triggers = {
-    access_key = var.flyte_s3_access_key
-    secret_sha = sha256(var.flyte_s3_secret_key)
-    bucket     = var.artifacts_bucket
-    region     = var.region
+    helm_revision = helm_release.flyte.metadata[0].revision
+    access_key    = var.flyte_s3_access_key
+    secret_sha    = sha256(var.flyte_s3_secret_key)
+    bucket        = var.artifacts_bucket
+    region        = var.region
   }
 
   provisioner "local-exec" {

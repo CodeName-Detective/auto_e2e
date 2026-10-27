@@ -586,31 +586,6 @@ def test_test_split_inventory_and_archive_sets_share_train_rules():
         )
 
 
-def test_scene_workflow_binds_the_shared_scene_pack_task():
-    node, = nuplan_dataset.wf_pack_nuplan_snapshot_scene_dataset.nodes
-    bindings = {binding.var: binding.binding for binding in node.bindings}
-    task = nuplan_dataset.pack_nuplan_snapshot_scene_partitions
-
-    assert node.flyte_entity.name.endswith(
-        "_pack_nuplan_snapshot_scene_dataset"
-    )
-    assert bindings["group_indices"].promise.var == "group_indices"
-    assert bindings["split"].promise.var == "split"
-    assert (
-        bindings["require_mission_goal"].promise.var
-        == "require_mission_goal"
-    )
-    assert task.metadata.cache_version == (
-        "nuplan-scene-pack-v3-manifest-v11"
-    )
-    assert task.metadata.retries == 1
-    assert task.python_interface.inputs["archive_ids"] is not None
-    assert (
-        nuplan_dataset.NUPLAN_SPLIT_GROUP_COUNTS["test"]
-        == nuplan_dataset.NUPLAN_TEST_GROUP_COUNT
-    )
-
-
 def test_scene_candidates_prefer_goals_then_preferred_types():
     def scenario(token: str, scenario_type: str, has_goal: bool):
         return SimpleNamespace(

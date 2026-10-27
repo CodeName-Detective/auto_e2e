@@ -11,8 +11,9 @@ phases:
   install:
     commands:
       # kubernetes: required to import the V1PodSpec/V1Volume models used by the
-      # train/eval /dev/shm PodTemplate at registration time.
-      - pip install -q flytekit==1.16.24 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
+      # train/eval /dev/shm PodTemplate at registration time. The Ray plugin and
+      # MLflow are imported by the wf_autoe2e task modules.
+      - pip install -q flytekit==1.16.24 flytekitplugins-ray==1.16.24 mlflow-skinny==3.13.0 numpy torch kubernetes --extra-index-url https://download.pytorch.org/whl/cpu
   build:
     commands:
       - ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -41,6 +42,9 @@ phases:
         AUTO_E2E_DATA_PREP_IMAGE="$(image_ref data-prep)" || exit 1
         export AUTO_E2E_TRAINING_IMAGE AUTO_E2E_EVAL_IMAGE
         export AUTO_E2E_OFFLINE_RL_IMAGE AUTO_E2E_DATA_PREP_IMAGE
+        export AUTO_E2E_RAY_STORAGE_PATH="s3://auto-e2e-platform-checkpoints-${ACCOUNT_ID}/ray-train"
+        # Baked into every task's environment so lineage records name the code.
+        export AUTO_E2E_GIT_COMMIT="${GIT_COMMIT:?set GIT_COMMIT to the source commit}"
       - |
         cat > /tmp/flyte.yaml << EOF
         admin:
@@ -54,4 +58,5 @@ phases:
         --version "${FLYTE_VERSION:-${IMAGE_TAG}}"
         --copy none
         --image "${AUTO_E2E_TRAINING_IMAGE}"
-        Platform/pipelines/workflows.py
+        Platform/pipelines/autoe2e.py
+        Platform/pipelines/autoe2e_acquire.py

@@ -1701,6 +1701,51 @@ def test_validate_stage_config_rejects_broadened_single_worker_smoke(
         validate_reactive_stage_config(config)
 
 
+def _kitscenes_single_worker_smoke_config() -> dict[str, object]:
+    config = _stage_config("kitscenes_finetune")
+    config.update({
+        "allow_single_worker_smoke": True,
+        "backbone": "res_net_50",
+        "capacity_block_end_utc": "",
+        "checkpoint_interval_steps": 4,
+        "epochs": 1,
+        "num_workers": 1,
+        "per_rank_batch_size": 1,
+        "precision": "bf16",
+        "resume_checkpoint_uri": "",
+        # The whole corpus: the frozen validation split exists only there.
+        "source_uris": [f"s3://datasets/kitscenes-{i:03d}" for i in range(533)],
+        "steps_per_epoch": 8,
+        "validation_sample_limit": 3820,
+        "worker_cpus": 3,
+    })
+    return config
+
+
+def test_validate_stage_config_accepts_single_worker_kitscenes_finetune_smoke():
+    validate_reactive_stage_config(_kitscenes_single_worker_smoke_config())
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"parent_checkpoint_uri": ""}, "nuPlan parent"),
+        ({"parent_checkpoint_epoch": 4}, "Epoch 5"),
+        ({"epochs": 2}, "single-worker smoke"),
+        ({"steps_per_epoch": 17}, "single-worker smoke"),
+        ({"per_rank_batch_size": 2}, "single-worker smoke"),
+        ({"capacity_block_end_utc": "2099-01-01T00:00:00Z"}, "single-worker smoke"),
+        ({"gradient_accumulation_steps": 2}, "single-worker smoke"),
+    ],
+)
+def test_validate_stage_config_bounds_single_worker_kitscenes_smoke(override, match):
+    config = _kitscenes_single_worker_smoke_config()
+    config.update(override)
+
+    with pytest.raises(ValueError, match=match):
+        validate_reactive_stage_config(config)
+
+
 def test_validate_stage_config_rejects_smoke_flag_on_production_topology():
     config = _stage_config("nuplan_full")
     config["allow_single_worker_smoke"] = True

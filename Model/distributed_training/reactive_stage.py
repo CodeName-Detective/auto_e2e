@@ -566,33 +566,46 @@ def validate_reactive_stage_config(config: Mapping[str, Any]) -> None:
         smoke_checkpoint_interval = int(
             config.get("checkpoint_interval_steps", 0)
         )
-        if (
-            stage is not ReactiveTrainingStage.NUPLAN_FULL
-            or training_scope is not ReactiveTrainingScope.BEV_ONLY
-            or int(config.get("epochs", 0)) != 1
-            or not 2 <= smoke_steps <= SINGLE_WORKER_SMOKE_MAX_STEPS
-            or smoke_checkpoint_interval > smoke_steps
-            or per_rank_batch_size != 1
-            or int(config.get("gradient_accumulation_steps", 0)) != 1
-            or str(config.get("backbone", "")) != "res_net_50"
-            or precision != "bf16"
-            or parent_uri
-            or resume_uri
-            or capacity_block_end_utc
-            or len(sources) > SINGLE_WORKER_SMOKE_MAX_SOURCES
-            or int(config.get("validation_sample_limit", 0))
-            > SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES
-            or not is_pretrained
-            or allow_random_init
-            or freeze_bevformer
-            or float(config["trajectory_weight"]) != 0.0
-            or float(config["bev_weight"]) <= 0.0
-            or float(config["route_weight"]) != 0.0
-        ):
+        bounded = (
+            int(config.get("epochs", 0)) == 1
+            and 2 <= smoke_steps <= SINGLE_WORKER_SMOKE_MAX_STEPS
+            and smoke_checkpoint_interval <= smoke_steps
+            and per_rank_batch_size == 1
+            and int(config.get("gradient_accumulation_steps", 0)) == 1
+            and str(config.get("backbone", "")) == "res_net_50"
+            and precision == "bf16"
+            and not resume_uri
+            and not capacity_block_end_utc
+            and is_pretrained
+            and not allow_random_init
+        )
+        nuplan_bev_smoke = (
+            stage is ReactiveTrainingStage.NUPLAN_FULL
+            and training_scope is ReactiveTrainingScope.BEV_ONLY
+            and not parent_uri
+            and len(sources) <= SINGLE_WORKER_SMOKE_MAX_SOURCES
+            and not freeze_bevformer
+            and float(config["trajectory_weight"]) == 0.0
+            and float(config["bev_weight"]) > 0.0
+            and float(config["route_weight"]) == 0.0
+            and int(config.get("validation_sample_limit", 0))
+            <= SINGLE_WORKER_SMOKE_MAX_VALIDATION_SAMPLES
+        )
+        # One validation GPU is all that is reserved without a Capacity Block,
+        # so the single pipeline's smoke fine-tunes KITScenes from the frozen
+        # nuPlan parent for a few steps; the parent contract above still holds.
+        # It reads the whole corpus: the frozen validation split exists only
+        # there, and the worker checks its exact sample identity.
+        kitscenes_finetune_smoke = (
+            stage is ReactiveTrainingStage.KITSCENES_FINETUNE
+            and bool(parent_uri)
+        )
+        if not bounded or not (nuplan_bev_smoke or kitscenes_finetune_smoke):
             raise ValueError(
                 "single-worker smoke must be a one-epoch, 2-16 step, "
-                "batch-one pretrained nuPlan BEV-only run over at most "
-                "two sources with no checkpoint lineage or Capacity Block"
+                "batch-one pretrained run with no resume or Capacity Block: "
+                "either nuPlan BEV-only over at most two sources without a "
+                "parent, or KITScenes fine-tuning from its nuPlan parent"
             )
 
 
@@ -4927,8 +4940,11 @@ def train_loop_per_worker(config: dict[str, Any]) -> None:
             for evidence in kitscenes_rank_sampling_evidence
             if isinstance(evidence, Mapping)
         )
+        # The single-worker smoke stops after a few steps by design, so it
+        # reads almost nothing of the corpus; the evidence is still recorded.
         if (
-            maximum_truncation_fraction
+            not single_worker_smoke
+            and maximum_truncation_fraction
             > KITSCENES_MAX_RANK_TRUNCATION_FRACTION
         ):
             raise ValueError(
@@ -6267,9 +6283,16 @@ def run_reactive_stage(config: Mapping[str, Any]) -> dict[str, Any]:
         raise RuntimeError(
             "final Reactive checkpoint does not match epoch history"
         )
+    final_checkpoint_uri = normalize_ray_checkpoint_uri(
+        str(result.checkpoint.path),
+        str(config["storage_path"]),
+    )
     return {
         "checkpoint_file_uri": f"{checkpoint_uri}/checkpoint.pt",
         "checkpoint_uri": checkpoint_uri,
+        "final_checkpoint_file_uri": f"{final_checkpoint_uri}/checkpoint.pt",
+        "final_checkpoint_uri": final_checkpoint_uri,
+        "final_epoch": int(history[-1]["epoch"]),
         "final_metrics": final_metrics,
         "history": history,
         "metrics": metrics,

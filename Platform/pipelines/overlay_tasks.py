@@ -40,7 +40,7 @@ _RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _large_shm_pod_template():
+def _large_shm_pod_template(workload_type: str = "gpu-validation"):
     """Mount enough shared memory for prefetched World-Model windows."""
     from flytekit import PodTemplate
     from kubernetes.client import (
@@ -56,7 +56,7 @@ def _large_shm_pod_template():
         annotations={"karpenter.sh/do-not-disrupt": "true"},
         primary_container_name="primary",
         pod_spec=V1PodSpec(
-            node_selector={"workload-type": "gpu-validation"},
+            node_selector={"workload-type": workload_type},
             tolerations=[
                 V1Toleration(
                     key="nvidia.com/gpu",
@@ -1382,6 +1382,7 @@ def resolve_overlay_model(
     requests=Resources(cpu="1", mem="2Gi"),
     limits=Resources(cpu="1", mem="2Gi"),
     environment=OVERLAY_TASK_ENV,
+    retries=2,
 )
 def prepare_overlay_set(
     resolved_metadata: FlyteFile,
@@ -1505,11 +1506,15 @@ def prepare_overlay_set(
     cache=True,
     cache_version=OVERLAY_CACHE_VERSION,
     cache_serialize=True,
-    pod_template=_large_shm_pod_template(),
+    # Reactive inference takes seconds per sample, so a set is split across
+    # the scale-to-zero overlay pool instead of the one validation GPU.
+    pod_template=_large_shm_pod_template("gpu-overlay"),
     labels={
-        "kueue.x-k8s.io/queue-name": "gpu-validation",
+        "kueue.x-k8s.io/queue-name": "gpu-overlay",
         "kueue.x-k8s.io/priority-class": "research-low",
     },
+    # Finished shards are skipped by their S3 head, so a retry resumes.
+    retries=2,
 )
 def precompute_overlay_partition(
     checkpoint: FlyteFile,

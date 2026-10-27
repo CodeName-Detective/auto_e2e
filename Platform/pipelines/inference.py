@@ -12,7 +12,9 @@ import torch
 
 
 NOISE_POLICY_VERSION = "v1"
-INFERENCE_CONTRACT_VERSION = "v4"
+# v5: CUDA inference runs under bf16 autocast, the KITScenes benchmark's
+# precision policy, so Console trajectories match the reported metrics.
+INFERENCE_CONTRACT_VERSION = "v5"
 
 
 def sha256_file(path: str | Path, chunk_size: int = 8 << 20) -> str:
@@ -32,6 +34,26 @@ def model_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in config.items() if key in valid}
 
 
+def reactive_policy_kwargs(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Rebuild a Reactive model from its stage, as the KITScenes evaluator does.
+
+    The saved config is not replayed: the reviewed stage constructor decides
+    the architecture, and pretrained weights are never fetched because the
+    state dict replaces them.
+    """
+    from training.reactive_multitask import ReactiveTrainingStage, reactive_model_kwargs
+
+    return {
+        "backbone": str(config["backbone"]),
+        "embed_dim": int(config["embed_dim"]),
+        "is_pretrained": False,
+        **reactive_model_kwargs(
+            ReactiveTrainingStage(config["training_stage"]),
+            num_views=int(config["num_views"]),
+        ),
+    }
+
+
 def load_policy(
     checkpoint_path: str | Path,
     device: str | torch.device,
@@ -41,12 +63,25 @@ def load_policy(
 
     checkpoint_path = Path(checkpoint_path)
     artifact_id = sha256_file(checkpoint_path)
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Reactive checkpoints carry metric and evidence payloads, not only tensors.
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = dict(checkpoint["config"])
-    model = AutoE2E(**model_kwargs(config)).to(device)
+    if "training_stage" in config:
+        model = AutoE2E(**reactive_policy_kwargs(config)).to(device)
+    else:
+        model = AutoE2E(**model_kwargs(config)).to(device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model, config, artifact_id
+
+
+def inference_autocast(device: torch.device):
+    """bf16 autocast on CUDA, nothing elsewhere."""
+    import contextlib
+
+    if torch.device(device).type != "cuda":
+        return contextlib.nullcontext()
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 
 
 def stable_seed64(
@@ -273,7 +308,7 @@ def predict_control(
     if batch.get("future_frames") is not None:
         kwargs["future_frames"] = batch["future_frames"]
 
-    with torch.no_grad():
+    with torch.no_grad(), inference_autocast(visual.device):
         prediction = model(
             visual,
             batch["map_context"],
@@ -294,6 +329,7 @@ def predict_control(
     return (
         prediction.reshape(batch_size, num_timesteps, num_signals)
         .detach()
+        .float()
         .cpu()
         .numpy()
     )

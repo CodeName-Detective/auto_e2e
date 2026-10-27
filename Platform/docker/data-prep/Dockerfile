@@ -72,7 +72,7 @@ RUN pip install --no-cache-dir \
     pyproj==3.7.2 \
     "pytest==9.0.3" \
     "boto3==1.43.0" \
-    pyarrow \
+    "pyarrow==21.0.0" \
     && pip install --no-cache-dir --no-deps "lerobot-dataset==0.5.0"
 
 # nuPlan imports aioboto3 even when its local blob store is selected. Keep the

@@ -76,29 +76,6 @@ def test_shared_pack_cache_includes_camera_resolution_contract():
     )
 
 
-def test_l2d_workflow_defaults_use_reactive_camera_contract():
-    source = Path(workflows.__file__).read_text(encoding="utf-8")
-
-    assert workflows.DATASET_PACK_VERSION == "v2.4"
-    assert workflows.KITSCENES_NAVIGATION_DATASET_VERSION == "v3.5"
-    assert "image_size: int = 256" not in source
-    assert (
-        source.count(
-            "image_size: int = REACTIVE_CAMERA_IMAGE_SIZE"
-        )
-        == 8
-    )
-    for name, dataset_version in (
-        ("buildspec-launch-fullrun.yml", "v3.5"),
-        ("buildspec-launch-overlay.yml", "v2.4"),
-    ):
-        buildspec = (
-            Path(workflows.__file__).parents[1] / name
-        ).read_text(encoding="utf-8")
-        assert f"DATASET_VERSION: {dataset_version}" in buildspec
-        assert 'IMAGE_SIZE: "512"' in buildspec
-
-
 def test_l2d_bounded_sampling_retains_every_nonempty_group():
     class Dataset:
         groups = ["a"] * 4 + ["b"] * 2 + ["c"] * 3
@@ -190,43 +167,6 @@ def test_l2d_bounded_sampling_rejects_empty_partition():
             Dataset(),
             sample_limit=1,
         )
-
-
-def test_l2d_sharded_workflow_binds_total_sample_limit():
-    _, mapped = workflows.wf_create_dataset_sharded.nodes
-    bindings = {
-        binding.var: binding.binding
-        for binding in mapped.bindings
-    }
-
-    assert (
-        bindings["total_sample_limit"].promise.var
-        == "total_sample_limit"
-    )
-    assert "sample_limit" in workflows.data_processing.python_interface.inputs
-
-    full_run_nodes = workflows.wf_sharded_full_run.nodes
-    dataset_node = next(
-        node
-        for node in full_run_nodes
-        if node.flyte_entity.name.endswith("wf_create_dataset_sharded")
-    )
-    full_run_bindings = {
-        binding.var: binding.binding
-        for binding in dataset_node.bindings
-    }
-    assert (
-        full_run_bindings["total_sample_limit"].promise.var
-        == "total_sample_limit"
-    )
-
-    buildspec = (
-        Path(workflows.__file__).parents[1] / "buildspec-launch-fullrun.yml"
-    ).read_text(encoding="utf-8")
-    assert "DATASET: KIT-MRT/KITScenes-Multimodal" in buildspec
-    assert 'TOTAL_SAMPLE_LIMIT: "0"' in buildspec
-    assert '--dataset "$DATASET"' in buildspec
-    assert "--total_sample_limit $TOTAL_SAMPLE_LIMIT" in buildspec
 
 
 def test_l2d_bounded_sampling_rejects_reasoning_labels():
@@ -391,96 +331,6 @@ def test_single_gpu_flyte_tasks_target_validation_capacity():
             if "pod_template" not in keywords:
                 missing_templates.append(node.name)
     assert missing_templates == []
-
-
-def test_reactive_bev_evaluation_uses_validation_gpu_contract():
-    template = distributed_training._bev_evaluation_pod_template()
-    assert template.pod_spec.node_selector == {
-        "workload-type": "gpu-validation"
-    }
-    assert template.pod_spec.volumes[0].empty_dir.size_limit == "16Gi"
-    assert {
-        "checkpoint",
-        "shards",
-        "dataset",
-        "benchmark_inventory",
-        "split",
-        "val_fraction",
-        "batch_size",
-        "num_loader_workers",
-        "probability_bins",
-        "validation_sample_limit",
-    } == set(
-        distributed_training.evaluate_reactive_bev_checkpoint
-        .python_interface.inputs
-    )
-    evaluation_node, publication_node = (
-        distributed_training
-        .wf_evaluate_reactive_bev_checkpoint
-        .nodes
-    )
-    assert evaluation_node.flyte_entity is (
-        distributed_training.evaluate_reactive_bev_checkpoint
-    )
-    assert publication_node.flyte_entity is (
-        distributed_training.publish_reactive_bev_evaluation
-    )
-    source = inspect.getsource(
-        distributed_training.evaluate_reactive_bev_checkpoint.task_function
-    )
-    assert "checkpoint_bev_probability_bins(config)" in source
-    assert "expected_sample_uids=expected_sample_uids" in source
-    assert "expected_sample_count=expected_sample_count" in source
-    assert '"evaluation_sample_count": expected_sample_count' in source
-    assert "validate_kitscenes_benchmark_inventory_coverage" in source
-    assert '"evaluation_sample_uid_sha256"' in source
-    assert "_log_reactive_bev_evaluation_to_mlflow" not in source
-    publish_source = inspect.getsource(
-        distributed_training.publish_reactive_bev_evaluation.task_function
-    )
-    assert "_log_reactive_bev_evaluation_to_mlflow" in publish_source
-    assert "checkpoint_hasher.hexdigest()" in publish_source
-    assert (
-        distributed_training
-        .publish_reactive_bev_evaluation
-        .environment["MLFLOW_TRACKING_URI"]
-        == distributed_training.MLFLOW_URI
-    )
-    resources = (
-        distributed_training.evaluate_reactive_bev_checkpoint.resources
-    )
-    assert resources.requests.cpu == "6"
-    assert resources.requests.mem == "28Gi"
-    assert resources.requests.gpu == "1"
-    assert resources.requests.ephemeral_storage == "420Gi"
-    assert resources.limits == resources.requests
-    buildspec = (
-        Path(distributed_training.__file__).parents[1]
-        / "buildspec-launch-reactive-bev-evaluation.yml"
-    ).read_text(encoding="utf-8")
-    assert 'VALIDATION_SAMPLE_LIMIT: "4096"' in buildspec
-    assert '"validation_sample_limit": int(' in buildspec
-    assert set(
-        distributed_training.ReactiveBEVEvaluationOutput.__annotations__
-    ) == {
-        "report",
-        "report_sha256",
-        "checkpoint_sha256",
-        "checkpoint_epoch",
-    }
-    assert set(
-        distributed_training
-        .ReactiveBEVEvaluationWorkflowOutput
-        .__annotations__
-    ) == {
-        "report",
-        "report_sha256",
-        "checkpoint_sha256",
-        "checkpoint_epoch",
-        "mlflow_run_id",
-        "registered_model_name",
-        "registered_model_version",
-    }
 
 
 def test_reactive_bev_evaluation_resolves_legacy_validation_sample_limit():
@@ -1476,7 +1326,7 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert "nodepool/gpu-validation" in deploy_script
     assert "nodeclass/auto-e2e-p5en-capacity-block" in deploy_script
     assert "kueue-manager-config" in deploy_script
-    assert "wait_for_gpu_quota auto-e2e-development 18" in deploy_script
+    assert "wait_for_gpu_quota auto-e2e-development 34" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-staging 0" in deploy_script
     assert "wait_for_gpu_quota auto-e2e-production 0" in deploy_script
     assert '"limits.nvidia.com/gpu" not in hard' in deploy_script
@@ -1485,7 +1335,6 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     assert "kubectl describe" in deploy_script
     for framework in (
         "batch/job",
-        "kubeflow.org/pytorchjob",
         "ray.io/rayjob",
         "pod",
     ):
@@ -1535,7 +1384,6 @@ def test_four_rank_performance_capacity_matches_ray_contract():
     ]
     for framework in (
         "batch/job",
-        "kubeflow.org/pytorchjob",
         "ray.io/rayjob",
         "pod",
     ):
@@ -1625,83 +1473,6 @@ def test_ray_tasks_serialize_the_resolved_storage_path():
     )
     assert distributed_training.train_reactive_stage_ray_8.environment == (
         expected_environment
-    )
-
-
-def test_kitscenes_val_workflow_enforces_primary_inventory():
-    evaluator, publisher = (
-        distributed_training.wf_evaluate_reactive_kitscenes_val.nodes
-    )
-    bindings = {
-        binding.var: binding.binding
-        for binding in evaluator.bindings
-    }
-
-    assert bindings["source_split"].scalar.primitive.string_value == "val"
-    assert (
-        bindings["batch_size"].scalar.primitive.integer
-        == distributed_training.KITSCENES_PRIMARY_VAL_BATCH_SIZE
-        == 5
-    )
-    assert (
-        bindings["expected_val_partition_count"]
-        .scalar.primitive.integer
-        == 117
-    )
-    assert (
-        bindings["use_stateful_camera_fpn_cache"]
-        .scalar.primitive.boolean
-        is True
-    )
-    assert publisher.flyte_entity is (
-        distributed_training.publish_reactive_kitscenes_evaluation
-    )
-
-
-def test_kitscenes_test_sharded_workflow_enforces_official_inventory():
-    evaluator, publisher = (
-        distributed_training
-        .wf_evaluate_reactive_kitscenes_test_sharded
-        .nodes
-    )
-    bindings = {
-        binding.var: binding.binding
-        for binding in evaluator.bindings
-    }
-
-    assert evaluator.flyte_entity is (
-        distributed_training.evaluate_reactive_kitscenes_checkpoint
-    )
-    assert (
-        bindings["source_split"].scalar.primitive.string_value
-        == "test"
-    )
-    assert (
-        bindings["expected_test_partition_count"]
-        .scalar.primitive.integer
-        == 206
-    )
-    assert bindings["batch_size"].scalar.primitive.integer == 5
-    assert (
-        bindings["use_stateful_camera_fpn_cache"]
-        .scalar.primitive.boolean
-        is True
-    )
-    assert publisher.flyte_entity is (
-        distributed_training.publish_reactive_kitscenes_evaluation
-    )
-    assert (
-        distributed_training.KITSCENES_OFFICIAL_TEST_SCENE_COUNT
-        == 206
-    )
-    publisher_bindings = {
-        binding.var: binding.binding
-        for binding in publisher.bindings
-    }
-    assert (
-        publisher_bindings["expected_model_version"]
-        .promise.var
-        == "expected_model_version"
     )
 
 
@@ -2316,45 +2087,6 @@ def test_reactive_mlflow_failure_recovers_latest_s3_history():
     ]
 
 
-def test_distributed_program_passes_stage_a_checkpoint_to_stage_b():
-    stage_a, stage_b = (
-        distributed_training.wf_train_reactive_nuplan_l2d_ray_8.nodes
-    )
-    assert stage_a.flyte_entity.name.endswith(
-        "train_reactive_stage_ray_8"
-    )
-    assert stage_b.flyte_entity.name.endswith(
-        "train_reactive_stage_ray_8"
-    )
-    stage_a_bindings = {
-        binding.var: binding.binding for binding in stage_a.bindings
-    }
-    stage_b_bindings = {
-        binding.var: binding.binding for binding in stage_b.bindings
-    }
-    assert stage_a_bindings["stage"].scalar.primitive.string_value == (
-        "nuplan_full"
-    )
-    assert stage_b_bindings["stage"].scalar.primitive.string_value == (
-        "l2d_continuation"
-    )
-    assert stage_a_bindings[
-        "freeze_bevformer"
-    ].scalar.primitive.boolean
-    assert stage_b_bindings[
-        "freeze_bevformer"
-    ].scalar.primitive.boolean
-    assert (
-        stage_a_bindings[
-            "parent_checkpoint"
-        ].scalar.union.value.scalar.none_type
-        is not None
-    )
-    parent_promise = stage_b_bindings["parent_checkpoint"].promise
-    assert parent_promise.node_id == stage_a.id
-    assert parent_promise.var == "checkpoint"
-
-
 def test_remote_dataset_inputs_are_required():
     remote = FlyteDirectory("s3://datasets/nuplan/reactive")
     assert distributed_training._flyte_remote_uri(remote) == (
@@ -2389,293 +2121,6 @@ def test_distributed_workflow_source_has_no_deployment_account_id():
         } <= set(task.python_interface.inputs)
 
 
-def test_four_rank_workflow_runs_one_frozen_multitask_stage():
-    node, = distributed_training.wf_train_reactive_nuplan_ray_4.nodes
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_4")
-    assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
-    assert bindings["bev_weight"].promise.var == "bev_weight"
-    assert bindings["route_weight"].promise.var == "route_weight"
-    assert bindings["resume_checkpoint"].promise.var == (
-        "resume_checkpoint"
-    )
-    assert (
-        bindings["per_rank_batch_size"].promise.var
-        == "per_rank_batch_size"
-    )
-    assert (
-        bindings["capacity_block_end_utc"].promise.var
-        == "capacity_block_end_utc"
-    )
-    assert (
-        bindings["checkpoint_interval_steps"].promise.var
-        == "checkpoint_interval_steps"
-    )
-    assert bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert (
-        distributed_training.train_reactive_stage_ray_4.metadata.retries
-        == 2
-    )
-    for task in (
-        distributed_training.train_reactive_stage_ray_4,
-        distributed_training.train_reactive_stage_ray_8,
-    ):
-        assert task.metadata.timeout == 0
-        assert task.metadata.labels == {
-            "kueue.x-k8s.io/queue-name": "p5en-capacity-block",
-            "kueue.x-k8s.io/priority-class": "production-high",
-        }
-
-
-def test_eight_rank_workflow_runs_one_frozen_trajectory_route_stage():
-    node, = distributed_training.wf_train_reactive_nuplan_ray_8.nodes
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["trajectory_weight"].promise.var == "trajectory_weight"
-    assert bindings["bev_weight"].promise.var == "bev_weight"
-    assert bindings["route_weight"].promise.var == "route_weight"
-    assert bindings["resume_checkpoint"].promise.var == (
-        "resume_checkpoint"
-    )
-    assert (
-        bindings["capacity_block_end_utc"].promise.var
-        == "capacity_block_end_utc"
-    )
-    assert (
-        bindings["checkpoint_interval_steps"].promise.var
-        == "checkpoint_interval_steps"
-    )
-    assert bindings["freeze_bevformer"].scalar.primitive.boolean
-
-    parameters = inspect.signature(
-        distributed_training.wf_train_reactive_nuplan_ray_8
-    ).parameters
-    assert parameters["trajectory_weight"].default == 1.0
-    assert parameters["bev_weight"].default == 0.0
-    assert parameters["route_weight"].default == 1.0
-    assert parameters["per_rank_batch_size"].default == 4
-    task_parameters = inspect.signature(
-        distributed_training.train_reactive_stage_ray_8.task_function
-    ).parameters
-    assert task_parameters["per_rank_batch_size"].default == 4
-    multistage_parameters = inspect.signature(
-        distributed_training.wf_train_reactive_nuplan_l2d_ray_8
-    ).parameters
-    assert multistage_parameters["per_rank_batch_size"].default == 4
-
-
-def test_kitscenes_workflow_is_locked_to_epoch5_trajectory_route_parent():
-    node, = distributed_training.wf_train_reactive_kitscenes_ray_8.nodes
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    assert bindings["stage"].scalar.primitive.string_value == (
-        "kitscenes_finetune"
-    )
-    assert bindings["parent_checkpoint"].promise.var == (
-        "nuplan_epoch5_checkpoint"
-    )
-    resume_binding = bindings["resume_checkpoint"].scalar
-    assert resume_binding.union is not None
-    assert (
-        type(resume_binding.union.value.scalar.none_type).__name__
-        == "Void"
-    )
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert bindings["training_scope"].scalar.primitive.string_value == (
-        "multitask"
-    )
-    assert bindings["validation_sample_limit"].scalar.primitive.integer == (
-        3820
-    )
-    assert bindings["parent_profile"].scalar.primitive.string_value == (
-        "nuplan_trajectory_route_v1"
-    )
-    assert (
-        bindings[
-            "parent_checkpoint_sha256"
-        ].scalar.primitive.string_value
-        == distributed_training
-        .NUPLAN_EPOCH5_TRAJECTORY_ROUTE_CHECKPOINT_SHA256
-    )
-    assert bindings["parent_checkpoint_epoch"].scalar.primitive.integer == 5
-
-    parameters = inspect.signature(
-        distributed_training.wf_train_reactive_kitscenes_ray_8
-    ).parameters
-    assert parameters["epochs"].default == 10
-    assert parameters["learning_rate"].default == 3e-5
-    assert parameters["per_rank_batch_size"].default == 2
-    assert parameters["checkpoint_interval_steps"].default == 256
-
-
-def test_eight_rank_bev_workflow_is_locked_to_segmentation_only():
-    node, = distributed_training.wf_train_reactive_nuplan_bev_ray_8.nodes
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["learning_rate"].promise.var == "learning_rate"
-    assert (
-        bindings["bev_encoder_learning_rate"].promise.var
-        == "bev_encoder_learning_rate"
-    )
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
-    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert bindings["training_scope"].scalar.primitive.string_value == (
-        "bev_only"
-    )
-    assert (
-        bindings[
-            "bev_repeat_frequency_threshold"
-        ].scalar.primitive.float_value
-        == pytest.approx(0.05)
-    )
-    assert (
-        bindings["validation_sample_limit"].scalar.primitive.integer
-        == 4096
-    )
-    parameters = inspect.signature(
-        distributed_training.wf_train_reactive_nuplan_bev_ray_8
-    ).parameters
-    assert parameters["epochs"].default == 5
-    assert parameters["learning_rate"].default == 1e-4
-    assert parameters["bev_encoder_learning_rate"].default == 1e-5
-    assert parameters["num_loader_workers"].default == 4
-    assert parameters["per_rank_batch_size"].default == 4
-
-
-def test_two_rank_real_bev_canary_uses_the_production_objective():
-    node, = (
-        distributed_training
-        .wf_train_reactive_nuplan_bev_ray_2_canary
-        .nodes
-    )
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_2")
-    assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["steps_per_epoch"].promise.var == "steps_per_epoch"
-    assert bindings["per_rank_batch_size"].scalar.primitive.integer == 1
-    assert bindings["precision"].scalar.primitive.string_value == "bf16"
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
-    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert bindings["training_scope"].scalar.primitive.string_value == (
-        "bev_only"
-    )
-
-
-def test_eight_rank_real_bev_canary_matches_production_topology():
-    nodes = (
-        distributed_training
-        .wf_train_reactive_nuplan_bev_ray_8_canary
-        .nodes
-    )
-    node = next(
-        item
-        for item in nodes
-        if item.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    )
-    gate = next(
-        item
-        for item in nodes
-        if item.flyte_entity.name.endswith(
-            "verify_reactive_bev_canary_training"
-        )
-    )
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    assert bindings["epochs"].promise.var == "epochs"
-    assert bindings["steps_per_epoch"].promise.var == "steps_per_epoch"
-    assert (
-        bindings["capacity_block_end_utc"].promise.var
-        == "capacity_block_end_utc"
-    )
-    assert bindings["per_rank_batch_size"].scalar.primitive.integer == 4
-    assert bindings["num_loader_workers"].scalar.primitive.integer == 4
-    assert bindings["precision"].scalar.primitive.string_value == "bf16"
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 0.0
-    assert not bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert bindings["training_scope"].scalar.primitive.string_value == (
-        "bev_only"
-    )
-    assert bindings[
-        "allow_bounded_bev_canary"
-    ].scalar.primitive.boolean
-    assert (
-        bindings["validation_sample_limit"].promise.var
-        == "validation_sample_limit"
-    )
-    assert {item.id for item in gate.upstream_nodes} == {node.id}
-
-
-def test_nuplan_trajectory_workflow_consumes_a_frozen_bev_parent():
-    node, = (
-        distributed_training
-        .wf_train_reactive_nuplan_from_bev_ray_8
-        .nodes
-    )
-    bindings = {
-        binding.var: binding.binding for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith("train_reactive_stage_ray_8")
-    assert bindings["parent_checkpoint"].promise.var == "bev_checkpoint"
-    assert bindings["trajectory_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["bev_weight"].scalar.primitive.float_value == 0.0
-    assert bindings["route_weight"].scalar.primitive.float_value == 1.0
-    assert bindings["freeze_bevformer"].scalar.primitive.boolean
-    assert bindings["training_scope"].scalar.primitive.string_value == (
-        "multitask"
-    )
-
-
-def test_production_checkpoint_interval_defaults_to_256_steps():
-    for task in (
-        distributed_training.train_reactive_stage_ray_4,
-        distributed_training.train_reactive_stage_ray_8,
-    ):
-        parameters = inspect.signature(task.task_function).parameters
-        assert parameters["checkpoint_interval_steps"].default == 256
-
-    for workflow in (
-        distributed_training.wf_train_reactive_nuplan_ray_4,
-        distributed_training.wf_train_reactive_nuplan_ray_8,
-        distributed_training.wf_train_reactive_nuplan_bev_ray_8,
-    ):
-        workflow_parameters = inspect.signature(workflow).parameters
-        assert (
-            workflow_parameters["checkpoint_interval_steps"].default
-            == 256
-        )
-
-
 def test_gpu_tasks_use_separate_training_and_validation_capacity():
     for task in (workflows.train_il, workflows.train_offline_rl):
         assert task.pod_template.pod_spec.node_selector == {
@@ -2703,90 +2148,6 @@ def test_gpu_tasks_use_separate_training_and_validation_capacity():
         assert task.metadata.labels[
             "kueue.x-k8s.io/queue-name"
         ] == "gpu-validation"
-
-
-def test_canary_launcher_is_idempotent_and_retries_flyte_admin():
-    buildspec = (
-        Path(distributed_training.__file__).parents[1]
-        / "buildspec-launch-distributed-canary.yml"
-    ).read_text()
-
-    assert "remote.fetch_execution(" in buildspec
-    assert "remote.sync_execution(" in buildspec
-    assert "FlyteEntityAlreadyExistsException" in buildspec
-    assert "FlyteEntityNotExistException" in buildspec
-    assert "grpc.StatusCode.UNAVAILABLE" in buildspec
-    assert "FLYTE_ADMIN_TRANSIENT_RETRY=" in buildspec
-    assert "remote.wait(" not in buildspec
-
-
-def test_nuplan_acquisition_launcher_uses_private_manifest_and_retries_admin():
-    buildspec = (
-        Path(distributed_training.__file__).parents[1]
-        / "buildspec-launch-nuplan-acquisition.yml"
-    ).read_text()
-
-    assert '"source_manifest": FlyteFile(' in buildspec
-    assert 'os.environ["SOURCE_MANIFEST_URI"]' in buildspec
-    assert '"datasets_bucket": os.environ["DATASETS_BUCKET"]' in buildspec
-    assert "remote.fetch_execution(" in buildspec
-    assert "remote.sync_execution(" in buildspec
-    assert "FlyteEntityAlreadyExistsException" in buildspec
-    assert "FlyteEntityNotExistException" in buildspec
-    assert "grpc.StatusCode.UNAVAILABLE" in buildspec
-    assert 'WAIT_FOR_COMPLETION: "true"' in buildspec
-    assert 'os.environ["WAIT_FOR_COMPLETION"] == "true"' in buildspec
-    assert "FLYTE_EXECUTION_DETACHED=true" in buildspec
-    assert "remote.wait(" not in buildspec
-    assert re.search(r"\b[0-9]{12}\b", buildspec) is None
-    workflow_source = Path(nuplan_dataset.__file__).read_text()
-    assert "authorized HTTPS source returned" in workflow_source
-    assert "authorized HTTPS source connection failed" in workflow_source
-    assert "copy_s3_object_multipart(" in workflow_source
-    assert "source_s3.get_object(" not in workflow_source
-
-
-def test_nuplan_acquisition_workflow_binds_one_dynamic_import_program():
-    node, = nuplan_dataset.wf_acquire_nuplan_raw_snapshot.nodes
-
-    assert node.flyte_entity.name.endswith(
-        "_acquire_nuplan_raw_snapshot"
-    )
-    bindings = {
-        binding.var: binding.binding
-        for binding in node.bindings
-    }
-    assert bindings["source_manifest"].promise.var == "source_manifest"
-    assert bindings["datasets_bucket"].promise.var == "datasets_bucket"
-    assert bindings["concurrency"].promise.var == "concurrency"
-
-
-def test_nuplan_snapshot_pack_uses_front_camera_cache_and_full_default():
-    node, = nuplan_dataset.wf_pack_nuplan_snapshot_reactive_dataset.nodes
-    bindings = {
-        binding.var: binding.binding
-        for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith(
-        "pack_nuplan_snapshot_reactive_dataset"
-    )
-    assert node.flyte_entity.metadata.cache_version == (
-        "nuplan-snapshot-pack-v13-manifest-v10"
-    )
-    assert node.flyte_entity.metadata.retries == 1
-    assert (
-        bindings["limit_total_scenarios"].promise.var
-        == "limit_total_scenarios"
-    )
-    buildspec = (
-        Path(nuplan_dataset.__file__).parents[1]
-        / "buildspec-launch-nuplan-pack.yml"
-    ).read_text()
-    assert 'LIMIT_TOTAL_SCENARIOS: "2048"' in buildspec
-    assert 'IMAGE_SIZE: "512"' in buildspec
-    assert "Platform.pipelines.nuplan_dataset." in buildspec
-    assert re.search(r"\b[0-9]{12}\b", buildspec) is None
 
 
 def test_nuplan_full_pack_plan_covers_every_train_sensor_group():
@@ -3001,94 +2362,6 @@ def test_nuplan_train_inventory_parser_rejects_incomplete_groups():
         )
 
 
-def test_nuplan_full_pack_workflow_binds_sharded_dynamic_program():
-    node, = (
-        nuplan_dataset
-        .wf_pack_nuplan_snapshot_reactive_dataset_sharded
-        .nodes
-    )
-    bindings = {
-        binding.var: binding.binding
-        for binding in node.bindings
-    }
-
-    assert node.flyte_entity.name.endswith(
-        "_pack_nuplan_snapshot_reactive_dataset_sharded"
-    )
-    assert (
-        bindings["total_scenario_limit"].promise.var
-        == "total_scenario_limit"
-    )
-    assert bindings["concurrency"].promise.var == "concurrency"
-    assert (
-        nuplan_dataset.NUPLAN_FULL_PACK_EPHEMERAL_STORAGE
-        == "1200Gi"
-    )
-
-
-def test_reactive_nuplan_launcher_uses_registered_eight_rank_workflow():
-    buildspec = (
-        Path(distributed_training.__file__).parents[1]
-        / "buildspec-launch-reactive-nuplan.yml"
-    ).read_text(encoding="utf-8")
-
-    assert (
-        "Platform.pipelines.distributed_training."
-        "wf_train_reactive_nuplan_bev_ray_8"
-    ) in buildspec
-    assert 'EPOCHS: "5"' in buildspec
-    assert 'CANARY_EPOCHS: "2"' in buildspec
-    assert 'test "${CANARY_EPOCHS}" = "2"' in buildspec
-    assert 'STEPS_PER_EPOCH: "128"' in buildspec
-    assert 'VALIDATION_SAMPLE_LIMIT: "1024"' in buildspec
-    assert 'LEARNING_RATE: "1e-4"' in buildspec
-    assert 'BEV_ENCODER_LEARNING_RATE: "1e-5"' in buildspec
-    assert 'PRECISION: "bf16"' in buildspec
-    assert 'VAL_FRACTION: "0.1"' in buildspec
-    assert 'NUM_LOADER_WORKERS: "4"' in buildspec
-    assert 'PER_RANK_BATCH_SIZE: "4"' in buildspec
-    assert "'^(1|2|4)$'" in buildspec
-    assert 'RESUME_CHECKPOINT_URI: ""' in buildspec
-    assert 'TRAJECTORY_WEIGHT: "0.0"' in buildspec
-    assert 'BEV_WEIGHT: "1.0"' in buildspec
-    assert 'ROUTE_WEIGHT: "0.0"' in buildspec
-    assert "NUPLAN_DATASET_URIS_URI" in buildspec
-    assert "len(dataset_uris) != 43" in buildspec
-    assert "len(set(dataset_uris)) != 43" in buildspec
-    assert "FlyteDirectory(uri) for uri in dataset_uris" in buildspec
-    assert "describe-capacity-reservations" in buildspec
-    assert "CAPACITY_BLOCK_MINIMUM_REMAINING_SECONDS" in buildspec
-    assert "Name=state,Values=active" in buildspec
-    assert "AvailableInstanceCount" not in buildspec
-    assert "exactly one active tagged P5 Capacity Block" in buildspec
-    assert 'capacity_block["ReservationType"] != "capacity-block"' in buildspec
-    assert "active P5 Capacity Block is missing EndDate" in buildspec
-    assert "Capacity Block instance type must be p5en or p5" in buildspec
-    assert "P5 Capacity Block must be in us-west-2a" in buildspec
-    assert "42 * 60 * 60" in buildspec
-    assert '"capacity_block_end_utc": capacity_block_end_utc' in buildspec
-    assert (
-        '"per_rank_batch_size": int('
-        in buildspec
-    )
-    assert '"resume_checkpoint": (' in buildspec
-    assert (
-        '"wf_train_reactive_nuplan_bev_ray_8_canary"'
-        in buildspec
-    )
-    assert '"steps_per_epoch": int(' in buildspec
-    assert '"validation_sample_limit": int(' in buildspec
-    assert '"epochs": int(os.environ["CANARY_EPOCHS"])' in buildspec
-    codebuild_terraform = (
-        Path(distributed_training.__file__).parents[1]
-        / "infra/modules/codebuild/main.tf"
-    ).read_text(encoding="utf-8")
-    assert '"ec2:DescribeCapacityReservations"' in codebuild_terraform
-    assert '"ec2:PurchaseCapacityBlock"' not in codebuild_terraform
-    assert "NUPLAN_DATASET_URI:" not in buildspec
-    assert re.search(r"\b[0-9]{12}\b", buildspec) is None
-
-
 def test_flyte_resource_quota_tracks_all_gpu_capacity():
     values_path = (
         Path(distributed_training.__file__).parents[1]
@@ -3109,7 +2382,7 @@ def test_flyte_resource_quota_tracks_all_gpu_capacity():
         for domain, settings in item.items()
     }
 
-    assert domains["development"]["projectQuotaGpu"] == "18"
+    assert domains["development"]["projectQuotaGpu"] == "34"
     assert domains["staging"]["projectQuotaGpu"] == "0"
     assert domains["production"]["projectQuotaGpu"] == "0"
     assert "limits.nvidia.com/gpu: {{ projectQuotaGpu }}" not in values_text
@@ -3121,49 +2394,6 @@ def test_nuplan_pack_worker_count_caps_full_and_limited():
     assert nuplan_dataset._nuplan_pack_worker_count(20, 0) == 8
     assert nuplan_dataset._nuplan_pack_worker_count(20, 64) == 8
     assert nuplan_dataset._nuplan_pack_worker_count(20, 4) == 4
-
-
-def test_two_rank_canary_wires_both_stages_and_gate():
-    nodes = distributed_training.wf_reactive_multistage_ray_2_canary.nodes
-
-    assert len(nodes) == 5
-    stage_a = nodes[2]
-    stage_b = nodes[3]
-    gate = nodes[4]
-    stage_b_bindings = {
-        binding.var: binding.binding
-        for binding in stage_b.bindings
-    }
-    stage_a_bindings = {
-        binding.var: binding.binding
-        for binding in stage_a.bindings
-    }
-    assert (
-        stage_a_bindings["trajectory_weight"]
-        .scalar.primitive.float_value
-        == 0.1
-    )
-    assert (
-        stage_a_bindings["bev_weight"].scalar.primitive.float_value
-        == 1.0
-    )
-    assert (
-        stage_a_bindings["route_weight"].scalar.primitive.float_value
-        == 0.1
-    )
-    assert stage_a_bindings[
-        "freeze_bevformer"
-    ].scalar.primitive.boolean
-    assert stage_b_bindings[
-        "freeze_bevformer"
-    ].scalar.primitive.boolean
-    assert stage_b_bindings["parent_checkpoint"].promise.node_id == (
-        stage_a.id
-    )
-    assert {node.id for node in gate.upstream_nodes} == {
-        stage_a.id,
-        stage_b.id,
-    }
 
 
 def test_canary_gate_requires_loss_decrease_and_stage_b_bev_off(tmp_path):

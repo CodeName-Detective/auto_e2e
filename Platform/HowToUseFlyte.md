@@ -1,431 +1,104 @@
-# How to Use Flyte — AutoE2E Pipeline UI Guide
+# How to Use Flyte
 
-A practical, screen-by-screen guide to the Flyte Console for the AutoE2E training
-platform. Organized by **what you want to do**, so you can jump straight to your use case.
+The platform registers two workflows. Everything a model needs, from raw data
+to registered and evaluated checkpoints, runs through them. The design is in
+`Design/single_flyte_pipeline.md`.
 
-- **Flyte Console**: https://d1fk8c95f6ice9.cloudfront.net/console
-- **Login**: Cognito-protected. Credentials are shared with **Core Contributors only** —
-  ask the maintainers for access. You will be redirected to a Cognito login page first.
-- **Project**: `auto-e2e` · **Domain**: `development`
+| Workflow | Run it when | Reaches Hugging Face |
+|---|---|---|
+| `wf_acquire_raw_snapshot` | once per dataset revision, to copy upstream data into an S3 raw snapshot | yes, and nothing else does |
+| `wf_autoe2e` | for every dataset build, training run, multi-stage step, or evaluation | no |
 
-> For task internals and parameters, see `flyte_workflow_parameters.md`.
-> This document focuses on **navigating the UI**.
-> The trajectory-overlay production path is ops-only and uses a VPC-local
-> CodeBuild launcher; see Use case G.
+Both are launched with `Platform/scripts/launch_autoe2e.py` and a JSON run
+file under `Platform/scripts/runs/` (gitignored, because it names account
+buckets). The launcher prints the typed inputs without `--execute`, so a run
+file can be checked before it starts anything.
 
----
+## 1. Acquire raw data once
 
-## 0. First time: logging in and finding the project
+A run file for KITScenes train adopts the July Full Run downloads and labels
+from S3 instead of the Hub:
 
-1. Open https://d1fk8c95f6ice9.cloudfront.net/console
-2. You are redirected to the Cognito hosted login. Sign in with the credentials
-   provided to Core Contributors (ask the maintainers — they are never stored in git).
-3. You land on the Flyte Console home. Top-left, make sure the **Project** selector
-   shows **`auto-e2e`** and the **Domain** selector shows **`development`**.
-   `auto-e2e` is the only active project.
-4. The left sidebar has three main sections you will use:
-   - **Workflows** — the DAGs you can launch
-   - **Tasks** — individual reusable steps
-   - **Executions** — the history of every run
-
----
-
-## Core concepts (30-second version)
-
-| Term | What it is | Where in UI |
-|------|------------|-------------|
-| **Task** | One containerized step (e.g. `train_il`) | Tasks tab |
-| **Workflow** | A DAG wiring tasks together (e.g. `wf_full_pipeline`) | Workflows tab |
-| **Launch Plan** | A runnable, versioned binding of a workflow + default inputs | "Launch Workflow" button |
-| **Execution** | One actual run of a launch plan | Executions tab |
-| **Node** | One task instance inside a running execution (n0, n1, …) | Inside an execution |
-
----
-
-## Use case A — "I want to train a model end-to-end"
-
-**You are**: an ML engineer who wants a full ingest → train → evaluate run.
-
-**Workflow to use**: `wf_full_pipeline`
-
-### Steps
-1. Sidebar → **Workflows** → click **`workflows.wf_full_pipeline`**.
-2. Top-right → **Launch Workflow**.
-3. A form appears with the inputs. Fill in:
-   - **`dataset`** (dropdown): `yaak-ai/L2D` or `nvidia/PhysicalAI-Autonomous-Vehicles`
-     — which processed dataset to actually train on.
-   - **`backbone`** (dropdown): `swin_v2_tiny` / `conv_next_v2_tiny` / `res_net_50`
-   - **`epochs_il`**, **`epochs_rl`**, **`batch_size`**, **`lr`**, **`tau`**, **`beta`**, **`episodes`** — numbers, defaults are fine for a smoke run.
-
-   There is no `fusion_mode` input: the model always uses BEV fusion. To run IL
-   without the memory-hungry offline-RL step, launch **`workflows.wf_ingest_train_eval`** instead.
-   - **No `hf_token` field** — the HF token is injected from a Kubernetes Secret.
-4. Click **Launch**. You are taken to the new **execution** page.
-
-### What you will see while it runs
-- A **graph (DAG) view** with nodes: `n0 … n7`.
-- Nodes light up Pending → Running → Succeeded.
-- Both datasets are ingested + processed in parallel (you will see two ingest and
-  two processing nodes running side by side), then the selected dataset flows into
-  training and evaluation.
-
-### When it finishes
-- The execution badge turns **Succeeded** (green).
-- Jump to **MLflow** to read the metrics (see Use case D).
-
----
-
-## Use case B — "I just want to (re)build the dataset shards"
-
-**You are**: someone iterating on preprocessing, or preparing data before training.
-
-**Workflows**: `wf_data_ingest`, then `wf_data_processing`
-
-### Steps
-1. **Workflows → `wf_data_ingest` → Launch Workflow**.
-   - Set `dataset` and `episodes`. Launch.
-   - When it succeeds, open the execution → **Outputs** tab → copy the
-     `FlyteDirectory` URI (the raw dataset cache).
-2. **Workflows → `wf_data_processing` → Launch Workflow**.
-   - Paste the raw URI into **`raw_data`**.
-   - Set `dataset`, `hz`, `image_size`, `episodes`. Launch.
-   - Output is a `FlyteDirectory` of WebDataset `.tar` shards + `manifest.json`.
-
-### How to read the output URI
-- Open the execution → **Nodes** → click the task node → **Outputs** panel.
-- Each `FlyteDirectory` / `FlyteFile` shows an `s3://…` URI you can reuse as input
-  to a later workflow.
-
----
-
-## Use case C — "I have shards already and just want to train / refine"
-
-**You are**: someone who already has processed shards and wants to skip ingest.
-
-**Workflows**: `wf_train_il`, then `wf_train_offline_rl`
-
-### IL training
-1. **Workflows → `wf_train_il` → Launch Workflow**.
-2. **`shards`** is a **list of `FlyteDirectory`** — add one entry per dataset's
-   processed shard dir (paste the URIs from Use case B). The task picks the one
-   matching **`dataset`**.
-3. Set `backbone`, `epochs`, `batch_size`, `lr`. Launch.
-4. Output: a `TrainOutput` with `checkpoint` and `metadata` FlyteFiles
-   (grab their URIs from the Outputs panel).
-
-### Offline-RL refinement
-1. **Workflows → `wf_train_offline_rl` → Launch Workflow**.
-2. Fill:
-   - **`pretrained`**: the IL `checkpoint` URI.
-   - **`il_metadata`**: the IL `metadata` URI.
-   - **`shards`**: same list of shard dirs.
-   - **`dataset`**, `epochs`, `tau`, `beta`.
-3. Launch. It refines the IL policy with IQL and runs `evaluate_rl_policy`.
-
----
-
-## Use case D — "I want to see results / compare experiments"
-
-**You are**: anyone evaluating model quality.
-
-Flyte shows **execution status**; **MLflow** shows **metrics**. Use both.
-
-### In Flyte (did it run? where did it fail?)
-1. Sidebar → **Executions**. The list shows every run with status, start time, duration.
-2. Click an execution to open the DAG. Red node = failure.
-3. Click a failed node → **Logs** (Kubernetes logs) and the error message panel.
-
-### In MLflow (how good is the model?)
-1. Open https://d33520viyb0smg.cloudfront.net/
-2. Pick an experiment:
-   - **`imitation-learning`** — IL runs (logged by `evaluate_il_policy`)
-   - **`offline-rl`** — RL-refined runs (logged by `evaluate_rl_policy`)
-3. The run table shows one row per run. Key columns:
-   - `model/backbone`, `model/fusion_mode`, `data/dataset`
-   - `eval/ade`, `eval/fde`, `eval/gate_pass`
-   - `train/lr`, `train/epochs`, etc.
-4. Select multiple runs → **Compare** to overlay loss curves and compare params.
-5. Each run also stores `config.yaml` + the checkpoint as **artifacts**, and the
-   model is registered under **`auto-e2e-driving-policy`** in the Model Registry.
-
-For KITScenes selector-v3 runs, `eval/ade` and `eval/fde` are the
-scene-balanced logged-XY ADE@3s and FDE@3s. Use the
-`validation_metric_*` MLflow tags to distinguish older metric contracts.
-
----
-
-## Use case E — "Something failed. How do I debug?"
-
-1. **Executions** → open the failed (red) execution.
-2. In the DAG, find the red node. Note which task it is (`data_ingest`, `train_il`, …).
-3. Click the node → right panel:
-   - **Execution Details**: the error message (e.g. OOMKilled, ImagePullBackOff, a Python traceback).
-   - **Logs**: live/last Kubernetes pod logs for that task.
-   - **Inputs / Outputs**: the exact data the node received and produced.
-4. Common failures and meaning:
-   | Symptom | Likely cause |
-   |---------|--------------|
-   | `OOMKilled` (exit 137) | task needs more memory — raise `Resources(mem=…)` |
-   | `ImagePullBackOff` | ECR image missing/wrong tag |
-   | `exceeded quota: project-quota` | namespace ResourceQuota too small |
-   | `WebIdentityErr / AssumeRoleWithWebIdentity` | Flyte S3 auth not on access-key |
-   | `Bus error / shared memory` | DataLoader `num_workers` too high for `/dev/shm` |
-5. Fix the root cause, then **Relaunch** (button on the execution page reuses the
-   same inputs) or launch fresh from the workflow.
-
----
-
-## Use case F — "I want to monitor a long-running training run"
-
-1. Open the execution page. It **auto-refreshes**.
-2. The **timeline / Gantt view** (toggle near the graph) shows how long each node
-   takes and what is running now.
-3. Click the running training node → **Logs** to watch epoch-by-epoch loss prints.
-4. GPU nodes (`train_il`, `train_offline_rl`, eval tasks) may sit in
-   **Pending / ContainerCreating** for 1–3 minutes while a GPU node is provisioned
-   by EKS Auto Mode — this is normal.
-
----
-
-## Use case G — "I want to publish v2.1 and precompute Console overlays"
-
-**You are**: a platform operator publishing an immutable dataset snapshot and
-precomputing one registered model's canonical trajectory overlays.
-
-**Workflows**:
-
-- Smoke: `wf_create_publish_and_precompute_overlays`
-- Production after training: `wf_publish_full_run_overlays`
-
-The DataModelConsole never invokes these workflows. Launch them through the
-VPC-local CodeBuild project so Flyte registration and every task image use ECR
-digests rather than mutable tags.
-
-### Prepare the tested source and images
-
-Run these commands from the tested feature-branch checkout:
-
-```bash
-export AWS_PROFILE=autowarefoundation
-export AWS_REGION=us-west-2
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-CACHE_BUCKET="auto-e2e-platform-codebuild-cache-${ACCOUNT_ID}"
-IMAGE_TAG="trajectory-$(git rev-parse --short=12 HEAD)"
-
-git archive --format=zip --output=/tmp/auto-e2e-source.zip HEAD
-aws s3 cp /tmp/auto-e2e-source.zip "s3://${CACHE_BUCKET}/source.zip"
-
-aws codebuild start-build \
-  --project-name auto-e2e-platform-build-images \
-  --environment-variables-override \
-    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
+```json
+{
+  "workflow": "wf_acquire_raw_snapshot",
+  "inputs": {
+    "dataset": "kitscenes",
+    "revision": "6fde0034446669e2ed7235e4c7fe323cd23d599d",
+    "snapshot_id": "kitscenes-train-20261021",
+    "split": "train",
+    "datasets_bucket": "<datasets bucket>",
+    "recovery_manifest": {"uri": "s3://<checkpoints bucket>/recovery-manifests/24afc76f….json", "version_id": "…", "sha256": "…"},
+    "adopt_labels": {"teacher": "openai_compatible", "teacher_model": "nvidia/Cosmos3-Nano", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}
+  }
+}
 ```
 
-Wait for the image build to reach `SUCCEEDED`, then register the same tag:
+Without `recovery_manifest`, the workflow downloads the listed `units` (or
+the whole SDK split) from the Hub. For nuPlan, pass
+`nuplan_source_manifest` instead; the existing receipt-based acquisition runs
+and its manifest is returned.
 
-```bash
-aws codebuild start-build \
-  --project-name auto-e2e-platform-flyte-register \
-  --environment-variables-override \
-    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
+The output is a `ManifestRef` (URI, version id, SHA-256). That reference is
+the `source_manifest` of every later `DatasetSpec`.
+
+## 2. Run the pipeline
+
+```json
+{
+  "workflow": "wf_autoe2e",
+  "dataset": {
+    "dataset": "kitscenes",
+    "source_manifest": {"uri": "…", "version_id": "null", "sha256": "…"},
+    "pack_version": "<current_pack_version('kitscenes')>",
+    "image_size": 256,
+    "unit_limit": 10,
+    "reasoning": {"teacher": "openai_compatible", "teacher_model": "nvidia/Cosmos3-Nano", "prompt_version": "action_relevant_reasoning_v3_temporal_front256", "label_stride": 10}
+  },
+  "training": {"gpu_profile": "ray_1", "stage": "kitscenes_finetune", "epochs": 1, "steps_per_epoch": 8},
+  "evaluation": [{"suite": "internal_val"}],
+  "runtime": {"datasets_bucket": "…", "checkpoints_bucket": "…", "tracking_url": "https://<mlflow>"}
+}
 ```
 
-The commit-derived tag keeps active workflows that still reference `latest`
-unchanged. Registration and launch resolve the selected `training`, `eval`,
-`offline-rl`, and `data-prep` tags to ECR digests. The launcher also recomputes
-the preprocessing and inference source digests inside the source bundle; Flyte
-tasks reject any mismatch at runtime.
+`pack_version` must equal `current_pack_version(dataset)` from
+`Platform/pipelines/autoe2e_adapters.py`; it changes whenever a pack contract
+changes, so stale data is never reused.
 
-### Launch the one-episode smoke
+What the run does, and what it skips:
 
-Choose an immutable numeric version from the MLflow registered model
-`auto-e2e-driving-policy`; do not use a moving alias.
+| Step | Skipped when |
+|---|---|
+| plan and resolve the dataset | — |
+| label units, pack, publish, commit | the same `DatasetSpec` is already published |
+| label one unit | its label set is already committed |
+| train on the profile's queue | `training.epochs` is 0 |
+| register one LoggedModel per distinct checkpoint | the checkpoint is already registered |
+| evaluate each target | — |
+| verify lineage | — |
 
-```bash
-MODEL_VERSION=30  # Example only; replace with the version you selected.
-aws codebuild start-build \
-  --project-name auto-e2e-platform-overlay-launch \
-  --environment-variables-override \
-    "name=MODEL_VERSION,value=${MODEL_VERSION},type=PLAINTEXT" \
-    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT"
-```
+GPU profiles: `ray_1` (one validation GPU, smoke only), `ray_2` (two
+validation GPUs), `ray_4` and `ray_8` (p5en Capacity Block). The profile is
+the only way to pick a queue; the 4- and 8-GPU tasks read the active block's
+end time themselves.
 
-The launcher defaults to `EPISODES=1`, `DATASET_VERSION=v2.1`, and
-`BASE_SEEDS=[0]`. It derives a `kitscenes-smoke-<digest>` publication name from
-the data contract, inference code, image, source revision, and smoke size. This
-keeps the smoke snapshot separate from the write-once production coordinate.
+## 3. Multi-stage training
 
-CodeBuild prints the remote Flyte execution. In Flyte Console, open
-**Executions** and inspect the newest
-`wf_create_publish_and_precompute_overlays` run. The high-level order is:
+Set `parent` to the previous stage's model version, for example
+`{"model_version": "auto-e2e-driving-policy/68"}`, and pick the next
+`training.stage`. A bare checkpoint (`{"checkpoint_uri": "s3://…"}`) is
+registered as an imported model first, so every stage has a model page.
 
-```text
-wf_create_dataset_sharded
-  -> wf_publish_dataset_snapshot
-  -> wf_precompute_overlays
-  -> overlay manifest
-  -> OVLSET building-to-ready gate
-```
+## 4. Evaluate an existing model
 
-Treat the smoke as successful only when the Flyte execution succeeds and the
-Console can read the published model overlay. A CodeBuild `SUCCEEDED` status
-only confirms that the remote execution was submitted.
+Set `training.epochs` to 0, `parent` to the model version, and list the
+evaluation targets. The metrics attach to that model; no new version is made.
 
-### Publish a completed Full Run
+## 5. When something fails
 
-Wait for `wf_sharded_full_run` to reach `SUCCEEDED`, then pass that execution ID.
-Do not pass `MODEL_VERSION`: the production workflow resolves the exact MLflow
-model whose `ctx/train_execution_id` matches the Full Run.
-
-```bash
-FULL_RUN_EXECUTION_ID=<SUCCEEDED_FLYTE_EXECUTION_ID>
-aws codebuild start-build \
-  --project-name auto-e2e-platform-overlay-launch \
-  --environment-variables-override \
-    "name=FULL_RUN_EXECUTION_ID,value=${FULL_RUN_EXECUTION_ID},type=PLAINTEXT" \
-    "name=IMAGE_TAG,value=${IMAGE_TAG},type=PLAINTEXT" \
-    "name=PUBLISHED_DATASET,value=kitscenes,type=PLAINTEXT"
-```
-
-The launcher fails closed unless the execution is the successful
-`wf_sharded_full_run` for KITScenes `v2.1`, used `episodes=0`, generated reasoning
-labels, and trained with reasoning and world-model branches enabled. It reads the
-nested `wf_create_dataset_sharded` `List[FlyteDirectory]` output directly from
-Flyte Admin, so it does not ingest, relabel, or repack the corpus. Inside Flyte,
-the model resolver checks the source dataset/version and the Full Run execution
-ID again before publication.
-
-The production coordinate is `kitscenes/v2.1`. Publication copies the existing
-labeled shard artifacts, then canonical overlay inference uses the Full Run
-checkpoint, and the ready gate is written last.
-
-### Materialize reasoning serving rows
-
-Wait for `wf_publish_full_run_overlays` itself, not only its CodeBuild launcher,
-to reach `SUCCEEDED`. Its named outputs are:
-
-- `overlay_result`: the ready canonical overlay set
-- `manifest_key`: the immutable publication manifest key
-- `manifest_sha256`: SHA-256 of the exact manifest bytes
-
-Use the latter two outputs to run the separately guarded Console Job. The Job
-uses the Console API Pod Identity because the Flyte and CodeBuild roles do not
-have the required DynamoDB `BatchWriteItem` permission.
-
-```bash
-source console-images.env
-export AWS_PROFILE=autowarefoundation
-export EXPECTED_AWS_ACCOUNT_ID=<PLATFORM_ACCOUNT_ID>
-export PUBLISHED_DATASET=kitscenes
-export DATASET_VERSION=v2.1
-export MANIFEST_KEY=<FLYTE_manifest_key_OUTPUT>
-export MANIFEST_SHA256=<FLYTE_manifest_sha256_OUTPUT>
-
-DRY_RUN=true \
-  Tools/DataModelConsole/deploy/run-reasoning-materialization.sh
-
-export CONFIRM_PRODUCTION_MATERIALIZATION=yes
-Tools/DataModelConsole/deploy/run-reasoning-materialization.sh
-```
-
-The launcher re-reads the manifest from S3 and verifies its digest before
-creating a `batch/v1 Job`. Monitor the generated Job to completion. A failed or
-interrupted run holds a 15-minute fencing lease; do not immediately start a
-second run. Normal `deploy/apply.sh` never launches this Job.
-
-### Retry and immutability rules
-
-- Retrying the exact same model, source, image, seeds, and contract is
-  idempotent. Existing compatible S3 objects and DynamoDB records are reused.
-- A conflicting body or identity at the same model/dataset/version/schema
-  coordinate fails; it is never overwritten.
-- Do not change `BASE_SEEDS`, the model artifact, or inference contract after a
-  coordinate is ready. Publish a new dataset/schema coordinate for an
-  intentional canonical-result change.
-- The ready gate is written last. A failed or `building` set is not advertised
-  by the Console, and retrying a ready set never moves it back to `building`.
-
----
-
-## Use case H — "I want an MP4 report for an overlay shard"
-
-**Workflow**: `wf_export_trajectory_report`
-
-Use this after the overlay set is `ready`. It is a CPU-only optional export and
-does not load the model checkpoint or run inference again.
-
-1. Copy one published shard URI from the dataset manifest.
-2. Copy its matching `overlay.bin.gz` URI from the overlay manifest or DynamoDB
-   pointer.
-3. Keep the immutable dataset-manifest and overlay-manifest S3 URIs used to
-   resolve those two objects.
-4. From that shard's dataset-manifest entry, copy the referenced immutable
-   `rig/{sha256}.json` URI.
-5. In Flyte Console, launch `wf_export_trajectory_report`.
-6. Set `shard`, `overlay`, `dataset_manifest`, `overlay_manifest`, and
-   `rig_projection` to those five immutable S3 URIs. Optionally set
-   `selection_manifest`, `scene_uids`, `seed_index`, `camera_index`, and
-   `max_frames_per_scene`.
-7. Download the returned `FlyteDirectory`, which contains per-scene MP4 files,
-   thumbnails, metrics, and `manifest.json`.
-
-The task joins predictions by `sample_uid`; verifies dataset/model/request
-lineage, AOVL digest, sample count, seeds, and `v0`; and rejects mismatched
-inputs. It is cached by immutable input URI and report schema.
-
----
-
-## Reading the DAG of `wf_full_pipeline`
-
-```
-n0 data_ingest(L2D)        n2 data_ingest(NVIDIA)     ← run in parallel
-        │                          │
-n1 data_processing(L2D)    n3 data_processing(NVIDIA) ← run in parallel
-        └───────────┬──────────────┘
-                    ▼  (both shard dirs passed; dataset arg selects one)
-            n4 train_il
-                    ▼
-            n5 evaluate_il_policy   → MLflow: imitation-learning
-                    ▼
-            n6 train_offline_rl
-                    ▼
-            n7 evaluate_rl_policy   → MLflow: offline-rl
-```
-(Node numbering can vary; hover a node to see its task name.)
-
----
-
-## Tips
-
-- **Launch Plan versions**: every `pyflyte register` creates a new version. The UI
-  defaults to the latest. If you need an exact version, pick it from the version
-  dropdown on the workflow page.
-- **Inputs are immutable per execution**: to change a parameter, launch a new run.
-- **Outputs are addressable**: any node's output `s3://…` URI can be fed as input to
-  another workflow — this is how you chain `wf_data_processing` → `wf_train_il` manually.
-- **Secrets never appear in the UI**: the HF token is injected from the `hf-token`
-  Kubernetes Secret and is not a workflow input, so it will not show up in any
-  Inputs panel.
-- **Project list**: the default Flyte sample projects (`flytesnacks`, etc.) are
-  archived, so only `auto-e2e` is visible.
-
----
-
-## Quick reference: which workflow for which goal
-
-| Goal | Workflow | Key inputs |
-|------|----------|------------|
-| Sharded Full Run, one command | `wf_sharded_full_run` | `dataset`, fan-out, training hyperparams |
-| Download raw data only | `wf_data_ingest` | `dataset`, `episodes` |
-| Preprocess raw → shards | `wf_data_processing` | `raw_data` URI, optional `reasoning_labels` |
-| Generate reasoning labels (teacher, cached) | `wf_generate_reasoning_labels` | `raw_data` URI, `teacher` |
-| Raw → ready-to-train dataset | `wf_create_dataset` | `dataset`, `episodes`, `reasoning_teacher` |
-| Smoke build → v2.1 publish → overlays | `wf_create_publish_and_precompute_overlays` | ops-only CodeBuild launch, `model_version` |
-| Completed Full Run → v2.1 publish → overlays | `wf_publish_full_run_overlays` | extracted `shards`, `full_run_execution_id` |
-| Publish existing shards → overlays | `wf_publish_and_precompute_overlays` | `shards`, immutable model/runtime identities |
-| Publish existing shards only | `wf_publish_dataset_snapshot` | `shards`, `published_dataset`, `dataset_version` |
-| Precompute an already identified snapshot | `wf_precompute_overlays` | `shards`, model version, dataset manifest digest |
-| Export an overlay shard as MP4 | `wf_export_trajectory_report` | matching immutable `shard`, `overlay`, dataset-manifest, overlay-manifest, and rig-projection URIs |
-| Train IL from existing shards | `wf_train_il` | `shards` list, `dataset` |
-| Refine with Offline RL | `wf_train_offline_rl` | `pretrained`, `il_metadata`, `shards` |
-| See metrics | (MLflow, not Flyte) | experiment `imitation-learning` / `offline-rl` |
+| Message | Meaning |
+|---|---|
+| `pack_version … is not this code's …` | regenerate the run file's `pack_version` |
+| `label set … is being produced by execution …` | another execution holds that unit's claim; wait, or delete the claim object if that execution is dead |
+| `… changed` / `… differs` | a stored artifact no longer matches its recorded digest; investigate before rerunning, nothing is rebuilt silently |
+| `expected one active auto-e2e-p5en-capacity-block` | buy or wait for a Capacity Block (`Platform/scripts/p5en_capacity_block.py`) |

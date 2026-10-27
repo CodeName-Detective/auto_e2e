@@ -41,6 +41,13 @@ phases:
           -t ${ECR_URL}/auto-e2e/data-prep:${IMAGE_TAG}
           -f Platform/docker/data-prep/Dockerfile .
 
+      # Import the libraries every task needs before anything is pushed: an
+      # unpinned upgrade once made pyarrow reject the image's NumPy, which only
+      # surfaced as task failures in production.
+      - echo "=== Import checks ==="
+      - docker run --rm ${ECR_URL}/auto-e2e/data-prep:${IMAGE_TAG} python -c "import numpy, pyarrow, pyarrow.parquet, kitscenes, flytekit, boto3; print('data-prep imports ok', numpy.__version__, pyarrow.__version__)"
+      - docker run --rm ${ECR_URL}/auto-e2e/training:${IMAGE_TAG} python -c "import numpy, torch, ray, mlflow, flytekit, flytekitplugins.ray; from mlflow.entities import LoggedModelInput; print('training imports ok', mlflow.__version__)"
+
       # Push in parallel. ECR dedups blobs, so the three training-image tags
       # upload the layers once.
       - echo "=== Pushing all images in parallel ==="

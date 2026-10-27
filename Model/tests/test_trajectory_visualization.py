@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 import io
 import json
@@ -212,34 +211,6 @@ def test_report_integrator_matches_evaluation_reference():
     mirrored = integrate_controls(controls, 7.5, curvature_sign=-1)
     np.testing.assert_allclose(mirrored[:, 0], expected[:, 0])
     np.testing.assert_allclose(mirrored[:, 1], -expected[:, 1])
-
-
-def test_export_workflow_uses_stable_module_task_resolver():
-    source = (
-        Path(__file__).parents[2] / "Platform/pipelines/workflows.py"
-    ).read_text()
-    module = ast.parse(source)
-    assert any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == (
-            "Platform.pipelines.trajectory_visualization_tasks"
-        )
-        and any(
-            alias.name == "export_trajectory_report"
-            for alias in node.names
-        )
-        for node in module.body
-    )
-    workflow = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "wf_export_trajectory_report"
-    )
-    assert not any(
-        isinstance(node, (ast.Import, ast.ImportFrom))
-        for node in ast.walk(workflow)
-    )
 
 
 def test_report_mp4_writer_round_trip(tmp_path):

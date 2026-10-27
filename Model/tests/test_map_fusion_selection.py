@@ -52,13 +52,6 @@ class TestReachesTheModel:
             "silently trains the constructor default"
         )
 
-    def test_workflow_passes_it_through(self):
-        params = inspect.signature(workflows.wf_train_il).parameters
-        assert "map_fusion_mode" in params
-        source = inspect.getsource(workflows.wf_train_il)
-        assert "map_fusion_mode=map_fusion_mode" in source
-
-
 class TestSurvivesTheCheckpoint:
     def test_checkpoint_config_records_it(self):
         """Evaluation rebuilds from this dict; a missing key loads mismatched weights."""

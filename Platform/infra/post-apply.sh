@@ -130,7 +130,7 @@ raise SystemExit(
   fi
 done
 
-wait_for_gpu_quota auto-e2e-development 18
+wait_for_gpu_quota auto-e2e-development 34
 wait_for_gpu_quota auto-e2e-staging 0
 wait_for_gpu_quota auto-e2e-production 0
 
@@ -171,6 +171,7 @@ echo "=== 5. Apply GPU NodeClasses, NodePools, and Kueue queues ==="
 sed "s/REPLACE_WITH_AWS_ACCOUNT_ID/${ACCOUNT}/g" \
   ../k8s/karpenter-nodepools/gpu-nodeclass.yaml | kubectl apply -f -
 kubectl apply -f ../k8s/karpenter-nodepools/gpu-nodepool.yaml
+kubectl apply -f ../k8s/karpenter-nodepools/gpu-overlay-nodepool.yaml
 kubectl apply -f ../k8s/kueue-config/kueue-objects.yaml
 for resource in \
   nodeclass/auto-e2e-gpu-validation \
@@ -185,7 +186,6 @@ kubectl --namespace kueue-system get configmap kueue-manager-config \
   > /tmp/auto-e2e-kueue-manager-config.yaml
 for framework in \
   batch/job \
-  kubeflow.org/pytorchjob \
   ray.io/rayjob \
   pod
 do

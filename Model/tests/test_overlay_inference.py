@@ -232,7 +232,7 @@ def test_predict_control_uses_packed_projection_and_native_front():
         geometry_type="pinhole",
     )
 
-    assert INFERENCE_CONTRACT_VERSION == "v4"
+    assert INFERENCE_CONTRACT_VERSION == "v5"
     assert model.kwargs is not None
     assert torch.equal(model.kwargs["projection"].matrix, matrix)
     assert torch.equal(model.kwargs["front_projection"].matrix, front_matrix)
@@ -512,3 +512,61 @@ def test_load_policy_filters_config_and_returns_checkpoint_identity(
     assert torch.equal(loaded.weight, source.weight)
     assert config["removed_argument"] == "ignored"
     assert artifact_id == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+
+
+def test_load_policy_rebuilds_reactive_checkpoints_from_their_stage(
+    tmp_path, monkeypatch
+):
+    from model_components import auto_e2e as auto_e2e_module
+    from Platform.pipelines import inference
+
+    seen = {}
+
+    class TinyPolicy(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen.update(kwargs)
+            self.weight = torch.nn.Parameter(torch.zeros(2))
+
+    checkpoint = tmp_path / "reactive.pt"
+    torch.save(
+        {
+            "model_state_dict": TinyPolicy().state_dict(),
+            "config": {"training_stage": "kitscenes_finetune", "backbone": "res_net_50",
+                       "embed_dim": 256, "num_views": 6, "is_pretrained": True},
+            "metrics": {"evidence": [object.__name__]},
+        },
+        checkpoint,
+    )
+    seen.clear()
+    monkeypatch.setattr(auto_e2e_module, "AutoE2E", TinyPolicy)
+    monkeypatch.setattr(inference, "reactive_policy_kwargs",
+                        lambda config: {"is_pretrained": False, "stage": config["training_stage"]})
+
+    load_policy(checkpoint, "cpu")
+
+    assert seen == {"is_pretrained": False, "stage": "kitscenes_finetune"}
+
+
+def test_reactive_policy_kwargs_use_the_stage_constructor_not_the_saved_config():
+    from Platform.pipelines.inference import reactive_policy_kwargs
+    from training.reactive_multitask import ReactiveTrainingStage, reactive_model_kwargs
+
+    config = {"training_stage": "kitscenes_finetune", "backbone": "res_net_50", "embed_dim": 256,
+              "num_views": 6, "is_pretrained": True, "map_context_channels": 3}
+    kwargs = reactive_policy_kwargs(config)
+    assert kwargs == {
+        "backbone": "res_net_50", "embed_dim": 256, "is_pretrained": False,
+        **reactive_model_kwargs(ReactiveTrainingStage.KITSCENES_FINETUNE, num_views=6),
+    }
+
+
+def test_inference_autocast_is_bf16_on_cuda_only():
+    from Platform.pipelines.inference import INFERENCE_CONTRACT_VERSION, inference_autocast
+
+    assert INFERENCE_CONTRACT_VERSION == "v5"
+    with inference_autocast(torch.device("cpu")):
+        assert not torch.is_autocast_enabled()
+    context = inference_autocast(torch.device("cuda"))
+    assert isinstance(context, torch.autocast)
+    assert context.fast_dtype == torch.bfloat16

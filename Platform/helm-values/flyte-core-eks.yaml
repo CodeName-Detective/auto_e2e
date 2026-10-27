@@ -291,6 +291,7 @@ configmap:
           - container
           - sidecar
           - k8s-array
+          - ray
           - connector-service
           - echo
         #          - sagemaker_hyperparameter_tuning
@@ -300,6 +301,7 @@ configmap:
           container: container
           sidecar: sidecar
           container_array: k8s-array
+          ray: ray
   #          sagemaker_custom_training_task: sagemaker_custom_training
   #          sagemaker_custom_training_job_task: sagemaker_custom_training
 
@@ -392,8 +394,9 @@ cluster_resource_manager:
             - projectQuotaMemory:
                 value: "8Ti"
             - projectQuotaGpu:
-                # Two p5 Capacity Block nodes plus two retained g6 validation GPUs.
-                value: "18"
+                # Two p5 Capacity Block nodes (16), two g6 validation GPUs, and
+                # 16 overlay-pool GPUs for wf_autoe2e's overlay fan-out.
+                value: "34"
             - defaultIamRole:
                 value: "arn:aws:iam::{{ .Values.userSettings.accountNumber }}:role/flyte-user-role"
 
