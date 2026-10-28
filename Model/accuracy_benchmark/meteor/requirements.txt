@@ -1,0 +1,8 @@
+# Tested: Ubuntu 26.04 / Python 3.12 / onnxruntime-gpu 1.30.
+numpy>=1.25,<2
+scipy>=1.11
+opencv-python-headless==4.9.0.80
+matplotlib>=3.8
+onnxruntime-gpu>=1.16
+huggingface_hub>=0.34
+requests>=2.31
